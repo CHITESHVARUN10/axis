@@ -1,0 +1,13 @@
+# Axis — core dependencies
+# Python 3.11 required (mediapipe wheels not available for 3.12+ at time of writing)
+
+mediapipe==0.10.35
+opencv-python==4.11.0.86
+opencv-contrib-python==4.11.0.86
+numpy==2.2.6
+
+# macOS controller (Phase 3+: cursor, clicks, scrolling)
+# Quartz comes with pyobjc — installs cleanly, harmless when unused
+pyobjc-framework-Quartz==10.3.2
+# macOS camera permission (Phase 1: request AVFoundation access on first launch)
+pyobjc-framework-AVFoundation==10.3.2

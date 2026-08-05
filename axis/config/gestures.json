@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "schema": "axis.gestures.v1",
+  "notes": "Built-in gesture definitions. Each entry: id, name, type, and a signature of landmark pair distances relative to palm size (wrist → middle MCP). User-registered gestures are appended to ~/.axis/gestures.json.",
+  "gestures": [
+    {
+      "id": "pinch",
+      "name": "Pinch",
+      "type": "static",
+      "signature": {
+        "pairs": [[8, 4], [12, 4]],
+        "ratios": [0.22, 0.22],
+        "tolerance": 0.10
+      }
+    },
+    {
+      "id": "open_palm",
+      "name": "Open Palm",
+      "type": "static",
+      "signature": {
+        "pairs": [[8, 4], [12, 4], [16, 4], [20, 4]],
+        "ratios": [0.85, 0.85, 0.85, 0.85],
+        "tolerance": 0.10
+      }
+    }
+  ]
+}

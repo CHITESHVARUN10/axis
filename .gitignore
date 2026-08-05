@@ -1,0 +1,16 @@
+# Axis
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
+# macOS
+.DS_Store
+# Camera/dev artifacts
+*.mp4
+*.avi
+# Tooling config (keep out of version control)
+.commandcode/
+.pytest_cache/
