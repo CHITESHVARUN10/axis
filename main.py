@@ -236,6 +236,8 @@ def main(argv: Optional[list[str]] = None) -> int:
             # Process navbar clicks (dropdown / TRAIN-STOP / close).
             while not click_queue.empty():
                 cx, cy = click_queue.get_nowait()
+                if view is not None:
+                    cx, cy = view.map_coords(cx, cy)
                 cmd = view.handle_click(cx, cy) if view is not None else None
                 if cmd == "close":
                     raise KeyboardInterrupt
@@ -320,6 +322,21 @@ def main(argv: Optional[list[str]] = None) -> int:
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
+            if view is not None:
+                # Keyboard fallback for gesture selection (the mouse may not
+                # map perfectly on Retina displays):
+                #   [  previous gesture   ]  next gesture
+                #   1..7  jump to gesture by number (1 = Scroll Down ...)
+                if key == ord("["):
+                    view.cycle_gesture(-1)
+                    train_gesture_name = view.selected_gesture
+                elif key == ord("]"):
+                    view.cycle_gesture(1)
+                    train_gesture_name = view.selected_gesture
+                elif ord("1") <= key <= ord("9"):
+                    idx = key - ord("1")
+                    if view.select_gesture_by_index(idx) is not None:
+                        train_gesture_name = view.selected_gesture
             if recorder.active and key == 27:  # ESC cancels recording
                 recorder.cancel()
                 print("\nRecording cancelled.")

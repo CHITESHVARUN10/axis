@@ -255,10 +255,11 @@ class DebugView:
         y = 8
         h = 40
         x = 10
-        # Gesture selector (opens dropdown).
-        sel_w = 180
+        # Gesture selector (opens dropdown). ASCII only — OpenCV's built-in
+        # font can't render '▼', it would show as '???'.
+        sel_w = 200
         self._buttons.append(
-            NavButton(self.selected_gesture + " ▼", x, y, sel_w, h, active=True)
+            NavButton(self.selected_gesture + " [+]", x, y, sel_w, h, active=True)
         )
         x += sel_w + gap
         # TRAIN / STOP toggle.
@@ -359,7 +360,11 @@ class DebugView:
         menu_options: Optional[list[str]] = None,
         menu_title: str = "",
     ) -> None:
-        """Render one frame and present it. Returns immediately."""
+        """Render one frame and present it. Returns immediately.
+
+        Key handling is done by the caller (main loop), not here — a
+        waitKey() inside this method would swallow keyboard input.
+        """
         self._hand_tracked = hand is not None and len(hand.hands) > 0
         color = recognition_color(rec)
         if hand is not None:
@@ -398,7 +403,24 @@ class DebugView:
         self._draw_navbar(frame)
         self._draw_toast(frame)
         cv2.imshow(self.window_name, frame)
-        cv2.waitKey(1)
+
+    def map_coords(self, x: int, y: int) -> tuple[int, int]:
+        """Map window (mouse) coords to image coords.
+
+        The mouse callback reports coordinates in the window's coordinate
+        space. On macOS the window can be larger than the image (Retina /
+        resize), so scale into the image. Falls back to identity.
+        """
+        try:
+            rx, ry, rw, rh = cv2.getWindowImageRect(self.window_name)
+        except cv2.error:
+            return x, y
+        if rw <= 0 or rh <= 0:
+            return x, y
+        # rx/ry is the image origin within the window; clamp+scale.
+        ix = (x - rx) * 640 / rw
+        iy = (y - ry) * 480 / rh
+        return int(ix), int(iy)
 
     def handle_click(self, x: int, y: int) -> Optional[str]:
         """Route a navbar click; returns a command or None.
@@ -427,6 +449,8 @@ class DebugView:
             if i == 0:
                 # Gesture selector → open/close dropdown.
                 self.dropdown_open = not self.dropdown_open
+                if self.dropdown_open:
+                    self._toast("Pick one — or press 1-7")
                 return "open_dropdown"
             if i == 1:
                 self.training = not self.training
@@ -438,6 +462,21 @@ class DebugView:
                 return "toggle_train"
             if b.label == "X":
                 return "close"
+        return None
+
+    def cycle_gesture(self, delta: int = 1) -> str:
+        """Move the gesture selection by delta (keyboard fallback)."""
+        n = len(self.gesture_names)
+        self.gesture_idx = (self.gesture_idx + delta) % n
+        self._toast(f"Gesture: {self.selected_gesture}")
+        return self.selected_gesture
+
+    def select_gesture_by_index(self, idx: int) -> Optional[str]:
+        """Select gesture by index (keyboard number shortcut)."""
+        if 0 <= idx < len(self.gesture_names):
+            self.gesture_idx = idx
+            self._toast(f"Gesture: {self.selected_gesture}")
+            return self.selected_gesture
         return None
 
     def _toast(self, msg: str) -> None:
