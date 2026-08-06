@@ -28,6 +28,7 @@ from axis.gestures.definitions import (
     finger_pattern,
     palm_size,
 )
+from axis.gestures.embedding import path_embedding
 from axis.landmarks import MIDDLE_MCP, Hand
 
 MIN_VELOCITY_FOR_DIRECTION = 0.005  # normalized units/frame; below = stationary
@@ -42,7 +43,8 @@ class MotionSample:
     y: float      # normalized palm y (0..1)
     mask: int     # finger pattern bitmask
     speed: float  # velocity in palm-sizes/frame (smoothed)
-    t: float      # seconds since recording start
+    palm_size: float = 0.0  # palm size (normalized) at this sample
+    t: float = 0.0          # seconds since recording start
 
 
 @dataclass
@@ -54,6 +56,7 @@ class MotionRecording:
     finger_mask: int = 0      # most common finger pattern
     speed: float = 0.0        # mean speed in palm-sizes/frame
     valid: bool = False       # True if enough motion captured
+    embedding: np.ndarray = None  # fixed-length path embedding
 
     def to_template(self, name: str, gesture_id: str) -> MotionTemplate:
         return MotionTemplate(
@@ -62,6 +65,7 @@ class MotionRecording:
             direction=self.direction,
             finger_mask=self.finger_mask,
             speed=self.speed,
+            embedding=self.embedding,
         )
 
 
@@ -129,12 +133,14 @@ class MotionRecorder:
 
         mask = finger_pattern(hand.landmarks)
         self._mask_counts[mask] = self._mask_counts.get(mask, 0) + 1
+        size = palm_size(hand.landmarks)
         self._samples.append(
             MotionSample(
                 x=float(pos[0]),
                 y=float(pos[1]),
                 mask=mask,
                 speed=self._speed_ema,
+                palm_size=float(size),
                 t=t,
             )
         )
@@ -250,13 +256,19 @@ class MotionRecorder:
                 mask_counts[s.mask] = mask_counts.get(s.mask, 0) + 1
             mask = max(mask_counts, key=mask_counts.get)
             speed = float(np.mean([s.speed for s in stroke[1:]]))
+            # Path embedding: resample + normalize the stroke, then DROP
+            # the raw samples (only the compact embedding is kept).
+            points = [np.array([s.x, s.y]) for s in stroke]
+            sizes = [s.palm_size for s in stroke]
+            emb = path_embedding(points, sizes)
             variations.append(
                 MotionRecording(
                     samples=stroke,
                     direction=direction,
                     finger_mask=mask,
                     speed=speed,
-                    valid=bool(direction) and speed > 0,
+                    valid=bool(direction) and speed > 0 and emb.size > 0,
+                    embedding=emb,
                 )
             )
 

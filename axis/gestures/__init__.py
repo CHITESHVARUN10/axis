@@ -1,4 +1,4 @@
-"""Gesture engine: definitions, registry, recognizer, recorder, user store."""
+"""Gesture engine: definitions, registry, recognizer, recorder, embedding, user store."""
 
 from axis.gestures.definitions import (
     FINGER_INDEX,
@@ -16,6 +16,12 @@ from axis.gestures.definitions import (
     normalized_signature,
     pair_distances,
     palm_size,
+)
+from axis.gestures.embedding import (
+    EMBED_DIM,
+    embedding_distance,
+    path_embedding,
+    resample_path,
 )
 from axis.gestures.recorder import (
     MotionRecorder,
@@ -55,6 +61,10 @@ __all__ = [
     "MotionRecorder",
     "MotionRecording",
     "MotionSample",
+    "EMBED_DIM",
+    "embedding_distance",
+    "path_embedding",
+    "resample_path",
     "GestureRecognizer",
     "Recognition",
     "can_scroll",

@@ -45,6 +45,7 @@ from axis.gestures.definitions import (
     normalized_signature,
     palm_size,
 )
+from axis.gestures.embedding import path_embedding
 from axis.landmarks import MIDDLE_MCP, HandData, Hand
 
 # --- built-in gesture builders -----------------------------------------
@@ -339,7 +340,10 @@ class GestureRecognizer:
         """Check live motion against learned templates (e.g. Scroll Down).
 
         Uses the primary hand's latched stroke direction + finger pattern +
-        speed, matched against MotionRegistry templates with tolerance.
+        speed + a live path embedding, matched against MotionRegistry
+        templates with tolerance. The embedding makes the match shape-aware
+        (a "scroll down" template won't match a "scroll up" stroke even at
+        the same speed/fingers).
         """
         if not hands:
             return None
@@ -349,14 +353,15 @@ class GestureRecognizer:
         if st is None or not st.get("latched"):
             return None
         direction = st["latched"]
-        # Speed from the recent path.
+        # Speed + live embedding from the recent path.
         buf = st.get("buffer", [])
         if len(buf) < 2:
             return None
         size = max(palm_size(primary.landmarks), 1e-6)
         disp = np.linalg.norm(buf[-1] - buf[0]) / size
         speed = disp / len(buf) * 10.0
-        tpl = self.motions.find(direction, mask, speed)
+        emb = path_embedding(buf, [size] * len(buf))
+        tpl = self.motions.find(direction, mask, speed, emb)
         if tpl is None:
             return None
         return Recognition(

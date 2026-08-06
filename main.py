@@ -14,6 +14,7 @@ No real OS actions yet — detection and feedback only.
 from __future__ import annotations
 
 import argparse
+import queue
 import sys
 import threading
 from typing import Optional
@@ -28,7 +29,6 @@ from axis.gestures import (
     MotionRecorder,
     MotionRegistry,
     Recognition,
-    finger_pattern_name,
     load_user_gestures,
     load_user_motions,
     make_open_palm_definition,
@@ -45,8 +45,6 @@ from axis.ui import DebugView
 # --------------------------------------------------------------------------
 
 RECORD_DURATION_S = 20.0
-
-MENU_OPTIONS = ["Scroll Down", "Scroll Up", "Scroll Left", "Scroll Right", "Zoom", "Name it myself", "Discard"]
 
 
 def _prompt_name(prompt: str) -> Optional[str]:
@@ -71,62 +69,24 @@ def _registration_worker(candidate: Recognition) -> None:
         print(f"\nRegistered gesture '{name}' — it will be recognized in future sessions.")
 
 
-def _classify_worker(
-    rec: MotionRecorder, motions: MotionRegistry, registry: GestureRegistry
-) -> None:
-    """After recording, offer to save captured variations as named templates.
+def _continue_worker(view) -> None:
+    """Every ~60s of training, ask whether to keep recording.
 
-    The 20s recording window captures multiple strokes (variations) — e.g.
-    scroll-down performed at different angles or with different finger
-    styles. Each variation is stored as its own template so all of them are
-    recognized later.
+    Blocks on input() in a background thread; the camera keeps streaming.
+    If the user declines (or the window closes), training stops.
     """
-    variations = rec.finish_variations()
-    if not variations:
-        print("\nNo valid motion captured — discarding.")
-        return
-
-    print(f"\nCaptured {len(variations)} motion variation(s):")
-    for i, v in enumerate(variations):
-        print(
-            f"  {i + 1}. direction={v.direction}, fingers="
-            f"{finger_pattern_name(v.finger_mask)}, speed={v.speed:.2f}"
-        )
-
-    print("\nClassify these gestures:")
-    for i, opt in enumerate(MENU_OPTIONS):
-        print(f"  {i + 1}. {opt}")
     try:
-        choice = input("Choose (1-7): ").strip()
+        ans = input(
+            "\nOne minute of training captured. Continue recording this "
+            "gesture? [y/N]: "
+        ).strip().lower()
     except (EOFError, KeyboardInterrupt):
-        choice = ""
-
-    # Map the choice to a base name for all variations.
-    name = None
-    if choice == "1":
-        name = "Scroll Down"
-    elif choice == "2":
-        name = "Scroll Up"
-    elif choice == "3":
-        name = "Scroll Left"
-    elif choice == "4":
-        name = "Scroll Right"
-    elif choice == "5":
-        name = "Zoom"
-    elif choice == "6":
-        name = _prompt_name("Name these gestures: ")
-    # choice 7 / invalid → discard
-
-    if name:
-        for i, v in enumerate(variations):
-            gid = f"{_slugify(name)}_{i}"
-            template = v.to_template(name=name, gesture_id=gid)
-            motions.add(template)
-            save_user_motion(template)
-        print(
-            f"Saved {len(variations)} motion template(s) for '{name}' — "
-            "recognized in future sessions."
-        )
+        ans = "n"
+    if ans not in ("y", "yes"):
+        view.training = False
+        view.record_count = 0
+        view._toast("Training stopped — DONE")
+    view._continue_done = True
 
 
 def _slugify(name: str) -> str:
@@ -233,14 +193,22 @@ def main(argv: Optional[list[str]] = None) -> int:
     recognizer = GestureRecognizer(registry, motions=motions)
 
     view = DebugView() if args.debug else None
+    click_queue: "queue.Queue[tuple[int, int]]" = queue.Queue()
+
+    def _on_mouse(event, x, y, flags, param):
+        if event == cv2.EVENT_LBUTTONDOWN:
+            click_queue.put((x, y))
+
+    # Open the window first (imshow creates it), THEN attach the mouse
+    # callback — setMouseCallback on a non-existent window silently fails.
+    if view is not None:
+        cv2.imshow(view.window_name, np.zeros((10, 10, 3), dtype=np.uint8))
+        cv2.setMouseCallback(view.window_name, _on_mouse)
+
     recorder = MotionRecorder(duration_s=RECORD_DURATION_S)
-    menu_options: Optional[list[str]] = None
-    menu_title = ""
     prompt_thread: Optional[threading.Thread] = None
-    confirmation_thread: Optional[threading.Thread] = None
-    # Gate: only trigger the record flow when we've seen a real, sustained
-    # "unknown" motion — not noise, not a held static pose.
-    unknown_motion_frames = 0
+    train_gesture_name: Optional[str] = None  # gesture selected in the navbar
+    continue_prompt_active = False
 
     print("Axis running. Press Ctrl+C to stop.")
     print(f"Hand tracking: {'on' if args.debug else 'headless'}")
@@ -265,50 +233,80 @@ def main(argv: Optional[list[str]] = None) -> int:
                 )
                 print(f"\r[{state}]" + " " * 20, end="", flush=True)
 
-            # --- state machine: normal → confirm → record → classify ----
-            if recorder.active:
-                # Recording in progress: feed frames to the recorder.
+            # Process navbar clicks (dropdown / TRAIN-STOP / close).
+            while not click_queue.empty():
+                cx, cy = click_queue.get_nowait()
+                cmd = view.handle_click(cx, cy) if view is not None else None
+                if cmd == "close":
+                    raise KeyboardInterrupt
+                if cmd == "toggle_train":
+                    if view.training:
+                        # TRAIN pressed: start a recording window NOW.
+                        train_gesture_name = view.selected_gesture
+                        recorder.start()
+                        print(f"\n[Recording '{view.selected_gesture}' — window 1]")
+                    else:
+                        # STOP pressed: end the training loop.
+                        recorder.cancel()
+                        continue_prompt_active = False
+                        print("\n[Training stopped]")
+                if cmd and cmd.startswith("select_gesture:"):
+                    train_gesture_name = cmd.split(":", 1)[1]
+
+            # --- state machine: train loop / classify / normal ----------
+            if view is not None and view.training and recorder.active:
+                # A 20s recording window in progress.
                 recorder.update(primary)
                 if recorder.done:
-                    recorder.cancel()  # stop; classify thread takes over
-                    menu_options = MENU_OPTIONS
-                    menu_title = "What did you mean by that gesture?"
-                    confirmation_thread = threading.Thread(
-                        target=_classify_worker,
-                        args=(recorder, motions, registry),
-                        daemon=True,
-                    )
-                    confirmation_thread.start()
-            elif confirmation_thread is not None and confirmation_thread.is_alive():
-                # Classification prompt active — camera keeps streaming.
-                pass
-            elif menu_options is not None and (
-                confirmation_thread is None or not confirmation_thread.is_alive()
-            ):
-                # Classification finished; clear the menu.
-                menu_options = None
-                menu_title = ""
-                confirmation_thread = None
-            elif rec.kind in ("none", "unknown") and rec.registration_candidate is None:
-                # Unrecognized *motion*: the recognizer returns "none" while
-                # the hand is moving in a way no template matches. Start the
-                # confirm → record flow after a few frames of sustained
-                # unknown motion (avoid noise).
-                if primary is not None:
-                    unknown_motion_frames += 1
-                    if unknown_motion_frames >= 5 and not recorder.active:
-                        unknown_motion_frames = 0
-                        recorder.start()
-                        print("\n[Recording unrecognized motion — perform it a few times]")
-            else:
-                unknown_motion_frames = 0
-                # Static unknown pose → old-style name prompt (threaded).
-                if rec.kind == "unknown" and rec.registration_candidate is not None:
-                    if prompt_thread is None or not prompt_thread.is_alive():
-                        prompt_thread = threading.Thread(
-                            target=_registration_worker, args=(rec,), daemon=True
+                    # Save this window's variations, then either continue
+                    # to the next window or stop.
+                    variations = recorder.finish_variations()
+                    view.record_count += 1
+                    if variations:
+                        for i, v in enumerate(variations):
+                            gid = f"{_slugify(train_gesture_name or 'custom')}_{view.record_count}_{i}"
+                            template = v.to_template(
+                                name=train_gesture_name or "Custom", gesture_id=gid
+                            )
+                            motions.add(template)
+                            save_user_motion(template)
+                        print(
+                            f"\n[Window {view.record_count}: saved {len(variations)} "
+                            f"variation(s) for '{train_gesture_name or 'Custom'}']"
                         )
-                        prompt_thread.start()
+                    else:
+                        print(
+                            f"\n[Window {view.record_count}: no valid motion captured]"
+                        )
+                    # Every 3 windows (~60s), ask to continue.
+                    if view.record_count % 3 == 0 and not continue_prompt_active:
+                        continue_prompt_active = True
+                        view._continue_done = False
+                        t = threading.Thread(
+                            target=_continue_worker,
+                            args=(view,), daemon=True,
+                        )
+                        t.start()
+                    else:
+                        recorder.start()  # next window
+            elif continue_prompt_active:
+                # Waiting on the "continue?" input thread.
+                if getattr(view, "_continue_done", False):
+                    continue_prompt_active = False
+                    if view.training:
+                        recorder.start()  # user said yes — next window
+                    # else: worker already stopped training
+                pass
+            elif view is not None and view.training and not recorder.active:
+                # Train armed but not recording (after STOP or before start).
+                pass
+            elif rec.kind == "unknown" and rec.registration_candidate is not None:
+                # Static unknown pose → old-style name prompt (threaded).
+                if prompt_thread is None or not prompt_thread.is_alive():
+                    prompt_thread = threading.Thread(
+                        target=_registration_worker, args=(rec,), daemon=True
+                    )
+                    prompt_thread.start()
 
             # --- render -------------------------------------------------
             if view is not None:
@@ -317,8 +315,6 @@ def main(argv: Optional[list[str]] = None) -> int:
                     rec,
                     hand_data,
                     recorder=recorder if recorder.active else None,
-                    menu_options=menu_options,
-                    menu_title=menu_title,
                 )
 
             key = cv2.waitKey(1) & 0xFF

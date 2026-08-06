@@ -300,6 +300,92 @@ def test_recorder_variations():
     assert len(variations) == 2
     assert all(v.direction == "down" for v in variations)
     assert all(v.valid for v in variations)
+    # Embeddings: fixed length, non-empty.
+    assert all(v.embedding is not None and v.embedding.size > 0 for v in variations)
+    # Raw samples are dropped after embedding (recorder reset).
+    assert len(rec._samples) == 0
+
+
+def test_embedding_similar_down():
+    """Two downward strokes at different speeds/angles → similar embeddings."""
+    from axis.gestures.embedding import embedding_distance, path_embedding
+
+    # Stroke A: straight down.
+    pts_a = [np.array([0.5, 0.1 * i]) for i in range(10)]
+    sizes_a = [0.2] * 10
+    # Stroke B: same path, slightly different angle + faster spacing.
+    pts_b = [np.array([0.55 + 0.02 * i, 0.12 * i]) for i in range(10)]
+    sizes_b = [0.2] * 10
+    emb_a = path_embedding(pts_a, sizes_a)
+    emb_b = path_embedding(pts_b, sizes_b)
+    assert emb_a.size == emb_b.size
+    d = embedding_distance(emb_a, emb_b)
+    assert d < 0.3, f"similar down strokes should be close, got {d:.3f}"
+
+
+def test_embedding_differs_up_vs_down():
+    """Down vs. up embeddings are far apart (the scroll-direction fix)."""
+    from axis.gestures.embedding import embedding_distance, path_embedding
+
+    pts_down = [np.array([0.5, 0.1 * i]) for i in range(10)]
+    pts_up = [np.array([0.5, 0.9 - 0.1 * i]) for i in range(10)]
+    sizes = [0.2] * 10
+    emb_down = path_embedding(pts_down, sizes)
+    emb_up = path_embedding(pts_up, sizes)
+    d = embedding_distance(emb_down, emb_up)
+    assert d > 0.5, f"up and down should be distinct, got {d:.3f}"
+
+
+def test_navbar_click_selects_gesture():
+    """Clicking the navbar gesture button cycles the selection."""
+    from axis.ui import DebugView
+
+    view = DebugView()
+    # Fake layout: simulate a 640-wide frame so buttons get positioned.
+    frame = np.zeros((480, 640, 3), dtype=np.uint8)
+    view._layout_buttons(640)
+    assert view.selected_gesture == "Scroll Down"
+    # Click the gesture selector (first button) → opens dropdown.
+    b = view._buttons[0]
+    cmd = view.handle_click(b.x + 5, b.y + 5)
+    assert cmd == "open_dropdown"
+    assert view.dropdown_open is True
+    # Click a dropdown item (e.g. "Scroll Up", the 2nd item).
+    item_h = 26
+    y_item = b.y + b.h + 2 + item_h + 5  # inside the 2nd item
+    cmd = view.handle_click(b.x + 5, y_item)
+    assert cmd == "select_gesture:Scroll Up"
+    assert view.selected_gesture == "Scroll Up"
+    assert view.dropdown_open is False
+    # Click TRAIN.
+    b2 = view._buttons[1]
+    cmd = view.handle_click(b2.x + 5, b2.y + 5)
+    assert cmd == "toggle_train"
+    assert view.training is True
+    # Click STOP (label changed when training).
+    cmd = view.handle_click(b2.x + 5, b2.y + 5)
+    assert cmd == "toggle_train"
+    assert view.training is False
+
+
+def test_motion_template_roundtrip_embedding():
+    """A template with an embedding survives to_dict/from_dict."""
+    from axis.gestures.embedding import path_embedding
+
+    pts = [np.array([0.5, 0.1 * i]) for i in range(10)]
+    emb = path_embedding(pts, [0.2] * 10)
+    tpl = MotionTemplate(
+        id="sd_0",
+        name="Scroll Down",
+        direction="down",
+        finger_mask=FINGER_INDEX | FINGER_MIDDLE,
+        speed=0.3,
+        embedding=emb,
+    )
+    d = tpl.to_dict()
+    tpl2 = MotionTemplate.from_dict(d)
+    assert tpl2.embedding is not None
+    assert np.allclose(tpl2.embedding, emb)
 
 
 if __name__ == "__main__":

@@ -77,11 +77,17 @@ def draw_landmarks(frame: np.ndarray, hand_data: HandData) -> None:
 
 def draw_label(frame: np.ndarray, text: str, color: tuple[int, int, int]) -> None:
     """Overlay a status label at the top of the frame."""
-    cv2.rectangle(frame, (10, 10), (frame.shape[1] - 10, 50), BLACK, -1)
+    draw_label_at(frame, text, color, y_top=10)
+
+
+def draw_label_at(frame: np.ndarray, text: str, color: tuple[int, int, int], y_top: int) -> None:
+    """Overlay a status label at an explicit vertical offset."""
+    h = frame.shape[0]
+    cv2.rectangle(frame, (10, y_top), (frame.shape[1] - 10, y_top + 40), BLACK, -1)
     cv2.putText(
         frame,
         text,
-        (20, 38),
+        (20, y_top + 28),
         cv2.FONT_HERSHEY_SIMPLEX,
         0.8,
         color,
@@ -193,11 +199,156 @@ def draw_signature(frame: np.ndarray, rec: Recognition) -> None:
 
 
 @dataclass
+class NavButton:
+    """A clickable navbar button."""
+
+    label: str
+    x: int
+    y: int
+    w: int
+    h: int
+    active: bool = False  # highlighted (e.g. current selection / armed)
+
+    def contains(self, px: int, py: int) -> bool:
+        return self.x <= px <= self.x + self.w and self.y <= py <= self.y + self.h
+
+
+NAVBAR_H = 56
+
+
+@dataclass
 class DebugView:
     """Owns the debug window and per-frame rendering."""
 
     window_name: str = "Axis — debug view"
     _trail: list[tuple[int, int]] = field(default_factory=list)
+    _hand_tracked: bool = False
+    # Gesture selection for training.
+    gesture_names: list[str] = field(
+        default_factory=lambda: [
+            "Scroll Down",
+            "Scroll Up",
+            "Scroll Left",
+            "Scroll Right",
+            "Zoom In",
+            "Zoom Out",
+            "Custom",
+        ]
+    )
+    gesture_idx: int = 0
+    training: bool = False  # TRAIN pressed → recording loop active
+    dropdown_open: bool = False
+    toast: str = ""
+    toast_until: float = 0.0
+    record_count: int = 0  # completed 20s windows (for the 60s prompt)
+    _continue_done: bool = True
+    _buttons: list[NavButton] = field(default_factory=list)
+
+    @property
+    def selected_gesture(self) -> str:
+        return self.gesture_names[self.gesture_idx]
+
+    def _layout_buttons(self, w: int) -> None:
+        """Position the navbar buttons for the current frame width."""
+        self._buttons = []
+        gap = 8
+        y = 8
+        h = 40
+        x = 10
+        # Gesture selector (opens dropdown).
+        sel_w = 180
+        self._buttons.append(
+            NavButton(self.selected_gesture + " ▼", x, y, sel_w, h, active=True)
+        )
+        x += sel_w + gap
+        # TRAIN / STOP toggle.
+        train_w = 90
+        label = "STOP" if self.training else "TRAIN"
+        self._buttons.append(
+            NavButton(label, x, y, train_w, h, active=self.training)
+        )
+        x += train_w + gap
+        # Recording counter (e.g. "REC 2").
+        rec_w = 90
+        rec_label = f"REC {self.record_count}" if self.training else "REC 0"
+        self._buttons.append(NavButton(rec_label, x, y, rec_w, h, active=False))
+        x += rec_w + gap
+        # Hand-tracked indicator (right-aligned).
+        track_label = "HAND: YES" if self._hand_tracked else "HAND: NO"
+        track_w = 110
+        x = w - track_w - 52
+        self._buttons.append(
+            NavButton(track_label, x, y, track_w, h, active=self._hand_tracked)
+        )
+        # Close (X) — left of the HAND button, not overlapping.
+        close_w = 34
+        x = w - close_w - 10
+        self._buttons.append(NavButton("X", x, y, close_w, h))
+        self._buttons[-1].active = False
+
+    def _draw_dropdown(self, frame: np.ndarray) -> None:
+        """Draw the gesture dropdown below the selector button."""
+        if not self.dropdown_open or not self._buttons:
+            return
+        b = self._buttons[0]
+        item_h = 26
+        x0, y0 = b.x, b.y + b.h + 2
+        w = b.w
+        for i, name in enumerate(self.gesture_names):
+            yi = y0 + i * item_h
+            selected = i == self.gesture_idx
+            bg = (0, 100, 0) if selected else (50, 50, 50)
+            cv2.rectangle(frame, (x0, yi), (x0 + w, yi + item_h), bg, -1)
+            cv2.rectangle(frame, (x0, yi), (x0 + w, yi + item_h), WHITE, 1)
+            cv2.putText(
+                frame,
+                name,
+                (x0 + 8, yi + 18),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                WHITE,
+                1,
+                cv2.LINE_AA,
+            )
+
+    def _draw_navbar(self, frame: np.ndarray) -> None:
+        h, w = frame.shape[:2]
+        cv2.rectangle(frame, (0, 0), (w, NAVBAR_H), (40, 40, 40), -1)
+        self._layout_buttons(w)
+        for b in self._buttons:
+            color = (0, 120, 0) if b.active else (90, 90, 90)
+            cv2.rectangle(frame, (b.x, b.y), (b.x + b.w, b.y + b.h), color, -1)
+            cv2.rectangle(frame, (b.x, b.y), (b.x + b.w, b.y + b.h), WHITE, 1)
+            cv2.putText(
+                frame,
+                b.label,
+                (b.x + 8, b.y + 26),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                WHITE,
+                1,
+                cv2.LINE_AA,
+            )
+        self._draw_dropdown(frame)
+
+    def _draw_toast(self, frame: np.ndarray) -> None:
+        if not self.toast or time.monotonic() > self.toast_until:
+            return
+        h, w = frame.shape[:2]
+        (tw, th), _ = cv2.getTextSize(self.toast, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)
+        x0 = (w - tw) // 2 - 10
+        y0 = h - 50
+        cv2.rectangle(frame, (x0, y0), (x0 + tw + 20, y0 + th + 16), BLACK, -1)
+        cv2.putText(
+            frame,
+            self.toast,
+            (x0 + 10, y0 + th + 6),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.6,
+            GREEN,
+            1,
+            cv2.LINE_AA,
+        )
 
     def show(
         self,
@@ -209,15 +360,14 @@ class DebugView:
         menu_title: str = "",
     ) -> None:
         """Render one frame and present it. Returns immediately."""
+        self._hand_tracked = hand is not None and len(hand.hands) > 0
         color = recognition_color(rec)
         if hand is not None:
             draw_landmarks(frame, hand)
-
-            # Record palm trail (primary hand) for registration visibility.
             if rec.kind == "unknown" and rec.registration_candidate is not None:
                 primary = hand.primary
                 if primary is not None:
-                    p = primary.landmarks[9]  # middle MCP as palm center
+                    p = primary.landmarks[9]
                     self._trail.append((int(p[0] * frame.shape[1]), int(p[1] * frame.shape[0])))
                     if len(self._trail) > TRAIL_LEN:
                         self._trail.pop(0)
@@ -227,17 +377,15 @@ class DebugView:
                 self._trail.clear()
 
         if recorder is not None and recorder.active:
-            # Recording: show the live path + progress bar instead of the
-            # static recognition label.
             draw_recording(frame, recorder)
         elif menu_options is not None:
             draw_menu(frame, menu_options, menu_title)
 
-        draw_label(frame, rec.label, color)
+        # Shift the status label below the navbar.
+        draw_label_at(frame, rec.label, color, y_top=NAVBAR_H + 6)
         if rec.kind == "scroll" and rec.scroll_direction:
             draw_scroll_arrow(frame, rec.scroll_direction)
         elif rec.kind == "zoom" and rec.zoom_direction:
-            # Zoom indicator: converging arrows for out, diverging for in.
             h, w = frame.shape[:2]
             cx, cy = w // 2, h // 2
             if rec.zoom_direction == "in":
@@ -246,8 +394,55 @@ class DebugView:
             else:
                 cv2.arrowedLine(frame, (cx - 20, cy), (cx - 60, cy), GREEN, 3, cv2.LINE_AA)
                 cv2.arrowedLine(frame, (cx + 20, cy), (cx + 60, cy), GREEN, 3, cv2.LINE_AA)
+
+        self._draw_navbar(frame)
+        self._draw_toast(frame)
         cv2.imshow(self.window_name, frame)
         cv2.waitKey(1)
+
+    def handle_click(self, x: int, y: int) -> Optional[str]:
+        """Route a navbar click; returns a command or None.
+
+        Commands: "open_dropdown", "select_gesture:<name>", "toggle_train",
+        "close". Dropdown item clicks are handled first.
+        """
+        # If the dropdown is open, check item clicks first.
+        if self.dropdown_open and self._buttons:
+            b = self._buttons[0]
+            item_h = 26
+            x0, y0 = b.x, b.y + b.h + 2
+            if x0 <= x <= x0 + b.w:
+                for i, name in enumerate(self.gesture_names):
+                    yi = y0 + i * item_h
+                    if yi <= y <= yi + item_h:
+                        self.gesture_idx = i
+                        self.dropdown_open = False
+                        self._toast(f"Gesture: {name}")
+                        return f"select_gesture:{name}"
+        self.dropdown_open = False
+
+        for i, b in enumerate(self._buttons):
+            if not b.contains(x, y):
+                continue
+            if i == 0:
+                # Gesture selector → open/close dropdown.
+                self.dropdown_open = not self.dropdown_open
+                return "open_dropdown"
+            if i == 1:
+                self.training = not self.training
+                self._toast(
+                    "Recording — press STOP to end"
+                    if self.training
+                    else "Recording stopped"
+                )
+                return "toggle_train"
+            if b.label == "X":
+                return "close"
+        return None
+
+    def _toast(self, msg: str) -> None:
+        self.toast = msg
+        self.toast_until = time.monotonic() + 3.0
 
     def close(self) -> None:
         cv2.destroyWindow(self.window_name)

@@ -69,17 +69,26 @@ The camera index may change if devices reorder, which is why name-based selectio
 - Scroll fires on either hand, but only an **extended** hand (index+middle out) — a moving fist/pinch never scrolls. This covers full-palm, two-finger, three-finger, and angled scrolls.
 - Lowered detection/tracking confidence thresholds (0.3) so hands re-acquire faster after leaving/returning the frame, and smaller/different hands (e.g. your sister's) are detected more readily.
 
-### Learning flow (when a motion isn't recognized)
+### Learning flow (navbar-driven training)
 
-The heart of the dev harness. When you move your hand in a way no template matches:
+The debug view has a **navbar** with clickable buttons:
 
-1. The app shows **"Recording — perform the gesture a few times"** with a progress bar and a live motion trail.
-2. It records **20 seconds** (ESC to cancel).
-3. A menu appears: **1. Scroll Down, 2. Scroll Up, 3. Scroll Left, 4. Scroll Right, 5. Zoom, 6. Name it myself, 7. Discard**.
-4. The recording is **split into strokes** — each time you perform the gesture (with a pause between), it becomes its own variation. Every variation (direction + finger pattern + speed) is saved as a separate template to `~/.axis/motions.json`.
-5. All variations are recognized in future sessions.
+- **Gesture selector** (first button, e.g. `Scroll Down ▼`) — click to open a **dropdown** listing all gestures: `Scroll Down`, `Scroll Up`, `Scroll Left`, `Scroll Right`, `Zoom In`, `Zoom Out`, `Custom`. Click an item to select it.
+- **TRAIN / STOP** — starts / stops a training session.
+- **REC n** — shows how many 20-second windows have been recorded in this session.
+- **HAND: YES/NO** — live indicator that the hand is being tracked.
+- **X** — close the app.
 
-**This is how scroll up vs. down gets trained**: during one 20s window, do "scroll down" a few times at different angles/finger styles (2 fingers, 3 fingers, full palm, tilted). Each becomes a template — and because direction is latched, a downward stroke never flips to "up".
+**To train a gesture:**
+
+1. Click the gesture selector → pick your target (e.g. **Scroll Down**) from the dropdown.
+2. Click **TRAIN** — a 20-second recording window starts **immediately** (nothing is automatic; the button becomes **STOP**).
+3. Perform the gesture during the window, varying angle and finger style (2 fingers, 3 fingers, full palm, tilted).
+4. When the 20s window ends, the recording is **split into strokes** — each repetition becomes a variation, converted to a **path embedding** (fixed-length, scale-invariant) and saved to `~/.axis/motions.json` under the selected gesture. The raw recording is discarded.
+5. The next 20-second window starts automatically. This repeats **every 20 seconds until you press STOP**.
+6. **Every 3 windows (≈60 seconds)** the app asks in the terminal: `Continue recording this gesture? [y/N]`. Answer `y` to keep going, `n` (or Enter) to stop.
+
+Because direction is latched and the embedding is shape-aware, a "Scroll Down" template won't match an upward stroke — the up/down confusion is structurally eliminated.
 
 ### Registering a static gesture
 

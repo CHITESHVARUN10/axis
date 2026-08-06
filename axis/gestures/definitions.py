@@ -224,9 +224,10 @@ class MotionTemplate:
     """A learned motion gesture (e.g. scroll down, scroll up).
 
     Captures the essential, scale-invariant signature of a recorded
-    motion: the dominant direction, the finger pattern used, and the
-    average speed. Matching compares these with tolerances, so the
-    recorded hand/angle doesn't need to be reproduced exactly.
+    motion: the dominant direction, the finger pattern used, the average
+    speed, and a *path embedding* (fixed-length resampled shape). The raw
+    recording is discarded after embedding — only this compact signature
+    is persisted.
     """
 
     id: str
@@ -236,8 +237,12 @@ class MotionTemplate:
     speed: float         # mean |velocity| in palm-sizes/frame
     speed_tolerance: float = 0.5
     finger_allow_extra: bool = True  # extra extended fingers still match
+    embedding: np.ndarray = None     # fixed-length path embedding (2*(N-1),)
 
     def to_dict(self) -> dict:
+        emb = None
+        if self.embedding is not None and self.embedding.size:
+            emb = [float(x) for x in self.embedding]
         return {
             "id": self.id,
             "name": self.name,
@@ -247,10 +252,16 @@ class MotionTemplate:
             "speed": float(self.speed),
             "speed_tolerance": self.speed_tolerance,
             "finger_allow_extra": self.finger_allow_extra,
+            "embedding": emb,
         }
 
     @classmethod
     def from_dict(cls, d: dict) -> "MotionTemplate":
+        emb = d.get("embedding")
+        if emb:
+            emb = np.array(emb, dtype=np.float64)
+        else:
+            emb = None
         return cls(
             id=d["id"],
             name=d["name"],
@@ -259,9 +270,10 @@ class MotionTemplate:
             speed=float(d.get("speed", 0.0)),
             speed_tolerance=float(d.get("speed_tolerance", 0.5)),
             finger_allow_extra=bool(d.get("finger_allow_extra", True)),
+            embedding=emb,
         )
 
-    def matches(self, direction: str, finger_mask: int, speed: float) -> bool:
+    def matches(self, direction: str, finger_mask: int, speed: float, embedding: np.ndarray = None) -> bool:
         """True if a live motion fits this template."""
         if direction != self.direction:
             return False
@@ -276,6 +288,14 @@ class MotionTemplate:
                 return False
         if abs(speed - self.speed) > self.speed * self.speed_tolerance + 0.02:
             return False
+        # Embedding check (soft tie-breaker): when the live path embedding
+        # is available and the template has one, require reasonable shape
+        # similarity. Skip if either side lacks an embedding.
+        if embedding is not None and self.embedding is not None and self.embedding.size:
+            from axis.gestures.embedding import embedding_distance
+
+            if embedding_distance(embedding, self.embedding) > 0.9:
+                return False
         return True
 
 
@@ -311,11 +331,27 @@ class MotionRegistry:
             json.dump(payload, f, indent=2)
             f.write("\n")
 
-    def find(self, direction: str, finger_mask: int, speed: float) -> Optional[MotionTemplate]:
-        """Best-matching template for a live motion, or None."""
+    def find(self, direction: str, finger_mask: int, speed: float, embedding: np.ndarray = None) -> Optional[MotionTemplate]:
+        """Best-matching template for a live motion, or None.
+
+        Among templates that pass the scalar gates (direction/fingers/
+        speed), the one with the closest embedding (when both have one)
+        wins. Falls back to insertion order if no embedding info.
+        """
         best = None
+        best_dist = float("inf")
         for t in self.templates.values():
-            if t.matches(direction, finger_mask, speed):
-                if best is None or t.id < best.id:
-                    best = t
+            if not t.matches(direction, finger_mask, speed, embedding):
+                continue
+            dist = 0.0
+            if (
+                embedding is not None
+                and t.embedding is not None
+                and t.embedding.size
+            ):
+                from axis.gestures.embedding import embedding_distance
+
+                dist = embedding_distance(embedding, t.embedding)
+            if best is None or dist < best_dist:
+                best, best_dist = t, dist
         return best
