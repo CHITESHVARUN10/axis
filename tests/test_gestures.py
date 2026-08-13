@@ -226,8 +226,9 @@ def test_stroke_latch_no_flap():
         out = rec.recognize([_hand(lm)])
     assert out.kind == "scroll"
     assert out.scroll_direction == "down"
-    # A subsequent tiny upward blip must NOT flip the latched direction.
-    for i in range(4):
+    # A subsequent tiny upward blip must NOT flip the latched direction —
+    # the latch only resets once the hand fully stops (STROKE_RESET_FRAMES).
+    for i in range(2):
         lm = lm + np.array([0.0, -0.01, 0.0])
         out = rec.recognize([_hand(lm)])
     assert out.scroll_direction == "down"
@@ -386,6 +387,43 @@ def test_motion_template_roundtrip_embedding():
     tpl2 = MotionTemplate.from_dict(d)
     assert tpl2.embedding is not None
     assert np.allclose(tpl2.embedding, emb)
+
+
+def test_navbar_map_coords_regression():
+    """map_coords must not subtract the window's screen origin (bug: it
+    mapped y=28 → y≈-1048, making every button unhittable)."""
+    from axis.ui import DebugView
+
+    view = DebugView()
+    view._last_frame_wh = (640, 480)
+    # Case 1: window == image → identity mapping.
+    view._buttons = []
+    cmd = None
+    # Simulate getWindowImageRect returning (0, 0, 640, 480).
+    import cv2 as _cv2
+
+    orig = _cv2.getWindowImageRect
+    try:
+        _cv2.getWindowImageRect = lambda name: (0, 0, 640, 480)
+        # A click at the selector center must map back to the same spot.
+        view._layout_buttons(640)
+        b = view._buttons[0]
+        mx, my = view.map_coords(b.x + 10, b.y + 10)
+        assert (mx, my) == (b.x + 10, b.y + 10)
+        # It must hit the button (open the dropdown).
+        cmd = view.handle_click(mx, my)
+        assert cmd == "open_dropdown"
+    finally:
+        _cv2.getWindowImageRect = orig
+
+    # Case 2: window is larger than the image (Retina) → scaled, not offset.
+    try:
+        _cv2.getWindowImageRect = lambda name: (0, 100, 1280, 960)
+        mx, my = view.map_coords(220, 56)  # 2x scaled click
+        assert mx == 110
+        assert my == 28
+    finally:
+        _cv2.getWindowImageRect = orig
 
 
 if __name__ == "__main__":

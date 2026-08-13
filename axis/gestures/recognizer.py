@@ -45,7 +45,7 @@ from axis.gestures.definitions import (
     normalized_signature,
     palm_size,
 )
-from axis.gestures.embedding import path_embedding
+from axis.gestures.differentiator import MotionDifferentiator
 from axis.landmarks import MIDDLE_MCP, HandData, Hand
 
 # --- built-in gesture builders -----------------------------------------
@@ -76,10 +76,6 @@ STATIC_DEBOUNCE_FRAMES = 3
 # A hand can scroll if index+middle are both extended (covers full palm,
 # two/three-finger scrolls, angled hands).
 SCROLL_MIN_FINGERS = FINGER_INDEX | FINGER_MIDDLE
-# Continuous pinch-zoom: thumb-index distance ratio for the "spread"
-# (zoom in) vs. "pinch" (zoom out) states.
-ZOOM_SPREAD_RATIO = 0.60   # above this = fingers spread
-ZOOM_PINCH_RATIO = 0.30    # below this = fingers pinched
 
 
 def make_pinch_definition() -> GestureDefinition:
@@ -181,8 +177,8 @@ class GestureRecognizer:
         self.motions = motions or MotionRegistry()
         # Per-hand scroll tracking state (keyed by hand identity).
         self._scroll: Dict[str, dict] = {}
-        # Per-hand zoom state (thumb-index ratio tracking).
-        self._zoom: Dict[str, dict] = {}
+        # The differentiator owns the dynamic (scroll/zoom) decision.
+        self._diff = MotionDifferentiator()
         self._unknown_frames = 0
         self._last_registration: Optional[GestureDefinition] = None
         self._static_state = ""
@@ -238,6 +234,12 @@ class GestureRecognizer:
         from per-frame velocity sign.
 
         Supports both vertical (up/down) and horizontal (left/right) strokes.
+
+        Note: this helper feeds `scroll_direction` for the debug view. The
+        final kind decision is made by the differentiator, but the latched
+        direction is stable even during the "ambiguous transition" frames
+        the differentiator reports as none, so the arrow overlay doesn't
+        flicker.
         """
         lm = hand.landmarks
         if not can_scroll(lm):
@@ -288,88 +290,12 @@ class GestureRecognizer:
                 direction = "right" if dx > 0 else "left"
             st["latched"] = direction
 
-        if not st["latched"]:
-            return "none", 0.0, ""
-
-        # Latched direction persists until the hand stops.
-        return "scroll", min(1.0, speed / 0.3), st["latched"]
-
-    def _update_zoom(self, hand: Hand) -> Tuple[str, float, str]:
-        """Continuous pinch-zoom: thumb-index distance over time.
-
-        Tracks the ratio r = dist(thumb,index) / palm_size. When the hand
-        spreads (r crosses ZOOM_SPREAD_RATIO going up) it's zoom-in; when
-        it pinches (r crosses ZOOM_PINCH_RATIO going down) it's zoom-out.
-
-        Fires *once per crossing* (edge-triggered): a held pinch at rest
-        does not keep zooming — that's a click, not a zoom. Re-arm happens
-        when the ratio moves back across the opposite threshold.
-        """
-        lm = hand.landmarks
-        size = palm_size(lm)
-        if size <= 1e-6:
-            return "none", 0.0, ""
-        key = self._hand_key(hand)
-        st = self._zoom.setdefault(key, {"last_ratio": None, "armed": True})
-        ratio = float(np.linalg.norm(lm[8, :2] - lm[4, :2]) / size)
-
-        direction = ""
-        if st["last_ratio"] is not None:
-            prev = st["last_ratio"]
-            if st["armed"] and ratio > ZOOM_SPREAD_RATIO and prev <= ZOOM_SPREAD_RATIO:
-                direction = "in"
-            elif st["armed"] and ratio < ZOOM_PINCH_RATIO and prev >= ZOOM_PINCH_RATIO:
-                direction = "out"
-        st["last_ratio"] = ratio
-
-        if direction:
-            st["armed"] = False  # fired — re-arm after returning to neutral
-        elif ratio > ZOOM_PINCH_RATIO and ratio < ZOOM_SPREAD_RATIO:
-            st["armed"] = True  # back to neutral range → can fire again
-
-        if direction:
-            return "zoom", 0.8, direction
-        return "none", 0.0, ""
+        # Latched direction persists until the hand stops. Return it (kind
+        # is informational; the differentiator decides final kind).
+        return "none", 0.0, st["latched"]
 
     def _reset_scroll(self) -> None:
         self._scroll.clear()
-
-    # --- motion template matching ---------------------------------------
-
-    def _match_motion(self, hands: List[Hand]) -> Optional[Recognition]:
-        """Check live motion against learned templates (e.g. Scroll Down).
-
-        Uses the primary hand's latched stroke direction + finger pattern +
-        speed + a live path embedding, matched against MotionRegistry
-        templates with tolerance. The embedding makes the match shape-aware
-        (a "scroll down" template won't match a "scroll up" stroke even at
-        the same speed/fingers).
-        """
-        if not hands:
-            return None
-        primary = max(hands, key=lambda h: h.score)
-        mask = finger_pattern(primary.landmarks)
-        st = self._scroll.get(self._hand_key(primary))
-        if st is None or not st.get("latched"):
-            return None
-        direction = st["latched"]
-        # Speed + live embedding from the recent path.
-        buf = st.get("buffer", [])
-        if len(buf) < 2:
-            return None
-        size = max(palm_size(primary.landmarks), 1e-6)
-        disp = np.linalg.norm(buf[-1] - buf[0]) / size
-        speed = disp / len(buf) * 10.0
-        emb = path_embedding(buf, [size] * len(buf))
-        tpl = self.motions.find(direction, mask, speed, emb)
-        if tpl is None:
-            return None
-        return Recognition(
-            kind="scroll",
-            label=tpl.name,
-            confidence=0.85,
-            scroll_direction=direction,
-        )
 
     # --- registration ---------------------------------------------------
 
@@ -405,7 +331,7 @@ class GestureRecognizer:
         """Classify one frame's hands into a Recognition result."""
         if not hands:
             self._reset_scroll()
-            self._zoom.clear()
+            self._diff.reset()
             self._unknown_frames = 0
             self._static_state = ""
             self._static_count = 0
@@ -416,61 +342,53 @@ class GestureRecognizer:
         size = palm_size(lm)
         if size <= 1e-6 or size < MIN_HAND_SIZE_RATIO:
             self._reset_scroll()
-            self._zoom.clear()
+            self._diff.reset()
             self._unknown_frames = 0
             self._static_state = ""
             self._static_count = 0
             return Recognition(kind="none", label="Tracking...", confidence=0.3)
 
-        # Continuous pinch-zoom: a pinching/spreading hand is zooming, not
-        # clicking. Takes priority over static pinch.
-        zoom_kind, zoom_conf, zoom_dir = "none", 0.0, ""
-        for h in hands:
-            k, c, d = self._update_zoom(h)
-            if k == "zoom" and c > zoom_conf:
-                zoom_kind, zoom_conf, zoom_dir = k, c, d
-        if zoom_kind == "zoom":
+        # Update the differentiator's sliding window with the primary hand.
+        self._diff.update(primary)
+        kind, direction, conf, label = self._diff.classify(self.motions)
+
+        # Feed the scroll arrow overlay from the stable stroke latch (the
+        # differentiator's direction can be "" during ambiguous frames).
+        _, _, scroll_dir = self._update_scroll(primary)
+
+        if kind == "zoom":
             self._static_state = ""
             self._static_count = 0
-            label = "Zooming in" if zoom_dir == "in" else "Zooming out"
             return Recognition(
                 kind="zoom",
-                label=label,
-                confidence=zoom_conf,
-                zoom_direction=zoom_dir,
+                label="Zooming in" if direction == "in" else "Zooming out",
+                confidence=conf,
+                zoom_direction=direction,
+                scroll_direction=scroll_dir,
             )
 
-        # Learned motion templates get priority (user-specific styles).
-        tpl_rec = self._match_motion(hands)
-        if tpl_rec is not None:
-            return tpl_rec
-
-        # Scroll: any scroll-compatible hand moving in a stroke scrolls
-        # (vertical or horizontal, direction latched).
-        scroll_kind, scroll_conf, scroll_dir = "none", 0.0, ""
-        for h in hands:
-            k, c, d = self._update_scroll(h)
-            if k == "scroll" and c > scroll_conf:
-                scroll_kind, scroll_conf, scroll_dir = k, c, d
-        if scroll_kind == "scroll":
+        if kind == "scroll":
             self._static_state = ""
             self._static_count = 0
             return Recognition(
                 kind="scroll",
-                label="You are trying to scroll",
-                confidence=scroll_conf,
-                scroll_direction=scroll_dir,
+                label=label or "You are trying to scroll",
+                confidence=conf,
+                scroll_direction=scroll_dir or direction,
             )
 
+        # Static branch: pinch / fist / open palm.
         static = self._debounced_static(self._classify_static(lm))
         if static is not None:
-            kind, conf = static
+            kind_static, conf_static = static
             labels = {
                 "pinch": "You are trying to click",
                 "fist": "Fist",
                 "open_palm": "Open palm",
             }
-            return Recognition(kind=kind, label=labels[kind], confidence=conf)
+            return Recognition(
+                kind=kind_static, label=labels[kind_static], confidence=conf_static
+            )
 
         candidate = self._update_registration(lm)
         if candidate is not None:

@@ -238,6 +238,7 @@ class MotionTemplate:
     speed_tolerance: float = 0.5
     finger_allow_extra: bool = True  # extra extended fingers still match
     embedding: np.ndarray = None     # fixed-length path embedding (2*(N-1),)
+    embedding_tolerance: float = 0.5  # max embedding distance to accept a match
 
     def to_dict(self) -> dict:
         emb = None
@@ -253,6 +254,7 @@ class MotionTemplate:
             "speed_tolerance": self.speed_tolerance,
             "finger_allow_extra": self.finger_allow_extra,
             "embedding": emb,
+            "embedding_tolerance": self.embedding_tolerance,
         }
 
     @classmethod
@@ -271,6 +273,7 @@ class MotionTemplate:
             speed_tolerance=float(d.get("speed_tolerance", 0.5)),
             finger_allow_extra=bool(d.get("finger_allow_extra", True)),
             embedding=emb,
+            embedding_tolerance=float(d.get("embedding_tolerance", 0.5)),
         )
 
     def matches(self, direction: str, finger_mask: int, speed: float, embedding: np.ndarray = None) -> bool:
@@ -294,7 +297,7 @@ class MotionTemplate:
         if embedding is not None and self.embedding is not None and self.embedding.size:
             from axis.gestures.embedding import embedding_distance
 
-            if embedding_distance(embedding, self.embedding) > 0.9:
+            if embedding_distance(embedding, self.embedding) > self.embedding_tolerance:
                 return False
         return True
 
@@ -331,6 +334,39 @@ class MotionRegistry:
             json.dump(payload, f, indent=2)
             f.write("\n")
 
+    def rank(self, direction: str, finger_mask: int, speed: float, embedding: np.ndarray = None) -> List[Tuple[MotionTemplate, float]]:
+        """All templates that pass the scalar gates, sorted best-first.
+
+        Each entry is (template, score) where score is a similarity in
+        [0, 1] (1 = best): 0.6 base for passing the gates, plus embedding
+        agreement (when both sides have an embedding), minus a speed-
+        deviation penalty.
+        """
+        from axis.gestures.embedding import embedding_distance
+
+        scored: List[Tuple[MotionTemplate, float]] = []
+        for t in self.templates.values():
+            if not t.matches(direction, finger_mask, speed, embedding):
+                continue
+            score = 0.6
+            if (
+                embedding is not None
+                and embedding.size
+                and t.embedding is not None
+                and t.embedding.size
+            ):
+                d = embedding_distance(embedding, t.embedding)
+                if d > t.embedding_tolerance:
+                    continue  # matches() already gates; keep double safety
+                score += 0.4 * (1.0 - min(d, 1.0))
+            if t.speed > 0:
+                tol = max(t.speed * t.speed_tolerance, 0.02)
+                dev = abs(speed - t.speed) / tol
+                score -= 0.2 * min(dev, 1.0)
+            scored.append((t, max(0.0, min(1.0, score))))
+        scored.sort(key=lambda c: c[1], reverse=True)
+        return scored
+
     def find(self, direction: str, finger_mask: int, speed: float, embedding: np.ndarray = None) -> Optional[MotionTemplate]:
         """Best-matching template for a live motion, or None.
 
@@ -338,20 +374,5 @@ class MotionRegistry:
         speed), the one with the closest embedding (when both have one)
         wins. Falls back to insertion order if no embedding info.
         """
-        best = None
-        best_dist = float("inf")
-        for t in self.templates.values():
-            if not t.matches(direction, finger_mask, speed, embedding):
-                continue
-            dist = 0.0
-            if (
-                embedding is not None
-                and t.embedding is not None
-                and t.embedding.size
-            ):
-                from axis.gestures.embedding import embedding_distance
-
-                dist = embedding_distance(embedding, t.embedding)
-            if best is None or dist < best_dist:
-                best, best_dist = t, dist
-        return best
+        ranked = self.rank(direction, finger_mask, speed, embedding)
+        return ranked[0][0] if ranked else None

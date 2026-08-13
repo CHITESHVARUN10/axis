@@ -44,6 +44,7 @@ class MotionSample:
     mask: int     # finger pattern bitmask
     speed: float  # velocity in palm-sizes/frame (smoothed)
     palm_size: float = 0.0  # palm size (normalized) at this sample
+    spread_ratio: float = 0.0  # thumb-index distance / palm size (articulation)
     t: float = 0.0          # seconds since recording start
 
 
@@ -134,6 +135,10 @@ class MotionRecorder:
         mask = finger_pattern(hand.landmarks)
         self._mask_counts[mask] = self._mask_counts.get(mask, 0) + 1
         size = palm_size(hand.landmarks)
+        lm = hand.landmarks
+        spread_ratio = 0.0
+        if size > 1e-6:
+            spread_ratio = float(np.linalg.norm(lm[8, :2] - lm[4, :2]) / size)
         self._samples.append(
             MotionSample(
                 x=float(pos[0]),
@@ -141,6 +146,7 @@ class MotionRecorder:
                 mask=mask,
                 speed=self._speed_ema,
                 palm_size=float(size),
+                spread_ratio=spread_ratio,
                 t=t,
             )
         )

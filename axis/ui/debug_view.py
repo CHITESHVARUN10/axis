@@ -243,6 +243,7 @@ class DebugView:
     record_count: int = 0  # completed 20s windows (for the 60s prompt)
     _continue_done: bool = True
     _buttons: list[NavButton] = field(default_factory=list)
+    _last_frame_wh: tuple[int, int] = (640, 480)
 
     @property
     def selected_gesture(self) -> str:
@@ -359,11 +360,16 @@ class DebugView:
         recorder: Optional[MotionRecorder] = None,
         menu_options: Optional[list[str]] = None,
         menu_title: str = "",
+        cursor_pos: Optional[tuple[int, int]] = None,
     ) -> None:
         """Render one frame and present it. Returns immediately.
 
         Key handling is done by the caller (main loop), not here — a
         waitKey() inside this method would swallow keyboard input.
+
+        `cursor_pos` is the virtual-cursor position in screen points
+        (top-left origin) when the overlay is active — drawn as a mirror
+        dot on the frame for diagnostics.
         """
         self._hand_tracked = hand is not None and len(hand.hands) > 0
         color = recognition_color(rec)
@@ -400,6 +406,20 @@ class DebugView:
                 cv2.arrowedLine(frame, (cx - 20, cy), (cx - 60, cy), GREEN, 3, cv2.LINE_AA)
                 cv2.arrowedLine(frame, (cx + 20, cy), (cx + 60, cy), GREEN, 3, cv2.LINE_AA)
 
+        self._last_frame_wh = (int(frame.shape[1]), int(frame.shape[0]))
+        if cursor_pos is not None:
+            # Mirror dot: normalized screen position → frame image coords.
+            h, w = frame.shape[:2]
+            from axis.cursor.controller import RelativePointer  # lazy: avoid cycle
+
+            # The caller passes screen points; normalize against a nominal
+            # screen. We only know the frame, so scale by frame dims.
+            mx = int((cursor_pos[0] / 1440.0) * w)
+            my = int((cursor_pos[1] / 900.0) * h)
+            mx = min(max(mx, 8), w - 8)
+            my = min(max(my, 8), h - 8)
+            cv2.circle(frame, (mx, my), 7, GREEN, 2)
+            cv2.circle(frame, (mx, my), 3, GREEN, -1)
         self._draw_navbar(frame)
         self._draw_toast(frame)
         cv2.imshow(self.window_name, frame)
@@ -407,20 +427,22 @@ class DebugView:
     def map_coords(self, x: int, y: int) -> tuple[int, int]:
         """Map window (mouse) coords to image coords.
 
-        The mouse callback reports coordinates in the window's coordinate
-        space. On macOS the window can be larger than the image (Retina /
-        resize), so scale into the image. Falls back to identity.
+        getWindowImageRect returns the window's screen rect (x,y is the
+        screen position, rw/rh is the window size). The mouse callback
+        already reports coords in window-content space (0,0 at the content
+        origin), so we must NOT subtract rx/ry — we only scale when the
+        window has been resized bigger than the image.
         """
+        fw, fh = self._last_frame_wh
         try:
-            rx, ry, rw, rh = cv2.getWindowImageRect(self.window_name)
+            _rx, _ry, rw, rh = cv2.getWindowImageRect(self.window_name)
         except cv2.error:
             return x, y
         if rw <= 0 or rh <= 0:
             return x, y
-        # rx/ry is the image origin within the window; clamp+scale.
-        ix = (x - rx) * 640 / rw
-        iy = (y - ry) * 480 / rh
-        return int(ix), int(iy)
+        if abs(rw - fw) <= 2 and abs(rh - fh) <= 2:
+            return x, y
+        return int(x * fw / rw), int(y * fh / rh)
 
     def handle_click(self, x: int, y: int) -> Optional[str]:
         """Route a navbar click; returns a command or None.

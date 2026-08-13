@@ -23,6 +23,7 @@ import cv2
 import numpy as np
 
 from axis.camera import Camera, CameraError
+from axis.cursor import CursorConfig, RelativePointer, VirtualCursor, load_cursor_config
 from axis.gestures import (
     GestureRecognizer,
     GestureRegistry,
@@ -144,6 +145,25 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         default=None,
         help="path to a custom config directory (default: ~/.axis)",
     )
+    parser.add_argument(
+        "--no-cursor",
+        dest="cursor",
+        action="store_false",
+        default=True,
+        help="disable the virtual-cursor overlay (default: on)",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=120.0,
+        help="inactivity timeout in seconds before the session pauses (default: 120)",
+    )
+    parser.add_argument(
+        "--hotkey",
+        default="",
+        help="global hotkey (keycode) to toggle Gesture Mode, e.g. '97' for F9 "
+        "(default: none)",
+    )
     return parser.parse_args(argv)
 
 
@@ -199,9 +219,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         if event == cv2.EVENT_LBUTTONDOWN:
             click_queue.put((x, y))
 
-    # Open the window first (imshow creates it), THEN attach the mouse
-    # callback — setMouseCallback on a non-existent window silently fails.
+    # Use a resize-free window so image rect == window content rect and
+    # mouse coords map 1:1 without Retina/aspect compensation.
     if view is not None:
+        cv2.namedWindow(view.window_name, cv2.WINDOW_AUTOSIZE)
         cv2.imshow(view.window_name, np.zeros((10, 10, 3), dtype=np.uint8))
         cv2.setMouseCallback(view.window_name, _on_mouse)
 
@@ -209,6 +230,32 @@ def main(argv: Optional[list[str]] = None) -> int:
     prompt_thread: Optional[threading.Thread] = None
     train_gesture_name: Optional[str] = None  # gesture selected in the navbar
     continue_prompt_active = False
+
+    # --- virtual cursor -------------------------------------------------
+    cursor_config = load_cursor_config()
+    pointer = RelativePointer(cursor_config)
+    overlay = VirtualCursor(cursor_config)
+    overlay_on = args.cursor and overlay.start()
+    if overlay_on:
+        print("Virtual cursor overlay: on")
+    else:
+        print("Virtual cursor overlay: disabled (or AppKit unavailable)")
+
+    # --- session gate (inactivity timeout) ------------------------------
+    from axis.session.hotkey import HotkeyListener, SessionGate
+
+    gate = SessionGate(timeout_s=args.timeout)
+    hotkey: Optional[HotkeyListener] = None
+    if args.hotkey:
+        hotkey = HotkeyListener(keycode=int(args.hotkey))
+        hotkey.on_toggle = lambda: (
+            gate.force_on() if not gate.active else gate.force_off()
+        )
+        if hotkey.start():
+            print(f"Global hotkey enabled (keycode {args.hotkey}).")
+        else:
+            hotkey = None
+            print("Could not install the global hotkey event tap.")
 
     print("Axis running. Press Ctrl+C to stop.")
     print(f"Hand tracking: {'on' if args.debug else 'headless'}")
@@ -223,6 +270,26 @@ def main(argv: Optional[list[str]] = None) -> int:
             hands = hand_data.hands if hand_data is not None else []
             primary = hand_data.primary if hand_data is not None else None
             rec = recognizer.recognize(hands)
+
+            # Session gate: note hand activity; the virtual cursor hides
+            # when the session has been inactive for the timeout.
+            if primary is not None:
+                gate.note_hand()
+            session_active = gate.active
+            cursor_pos = None
+            if overlay_on:
+                if session_active and primary is not None:
+                    # Palm center (normalized) → relative pointer.
+                    lm = primary.landmarks
+                    c = (
+                        float(np.mean(lm[[0, 5, 9, 13, 17], :2], axis=0)[0]),
+                        float(np.mean(lm[[0, 5, 9, 13, 17], :2], axis=0)[1]),
+                    )
+                    cursor_pos = pointer.update(c)
+                    overlay.update(cursor_pos[0], cursor_pos[1], True)
+                else:
+                    pointer.reset()
+                    overlay.hide()
 
             # Headless progress line.
             if not args.debug and (prompt_thread is None or not prompt_thread.is_alive()):
@@ -317,6 +384,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     rec,
                     hand_data,
                     recorder=recorder if recorder.active else None,
+                    cursor_pos=cursor_pos,
                 )
 
             key = cv2.waitKey(1) & 0xFF
@@ -343,6 +411,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     except KeyboardInterrupt:
         pass
     finally:
+        if overlay_on:
+            overlay.stop()
+        if hotkey is not None:
+            hotkey.stop()
         if view is not None:
             view.close()
         extractor.close()

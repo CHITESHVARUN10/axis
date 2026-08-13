@@ -11,3 +11,7 @@ numpy==2.2.6
 pyobjc-framework-Quartz==10.3.2
 # macOS camera permission (Phase 1: request AVFoundation access on first launch)
 pyobjc-framework-AVFoundation==10.3.2
+# macOS virtual-cursor overlay (Phase 1: click-through AppKit dot)
+pyobjc-framework-Cocoa==10.3.2
+# macOS Accessibility trust check (Phase 1: transparent permission guidance)
+pyobjc-framework-ApplicationServices==10.3.2

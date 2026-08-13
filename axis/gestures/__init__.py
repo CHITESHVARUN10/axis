@@ -17,6 +17,11 @@ from axis.gestures.definitions import (
     pair_distances,
     palm_size,
 )
+from axis.gestures.differentiator import (
+    DifferentiatorConfig,
+    MotionDifferentiator,
+    MotionWindow,
+)
 from axis.gestures.embedding import (
     EMBED_DIM,
     embedding_distance,
@@ -61,6 +66,9 @@ __all__ = [
     "MotionRecorder",
     "MotionRecording",
     "MotionSample",
+    "DifferentiatorConfig",
+    "MotionDifferentiator",
+    "MotionWindow",
     "EMBED_DIM",
     "embedding_distance",
     "path_embedding",

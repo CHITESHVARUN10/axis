@@ -28,12 +28,35 @@ python main.py            # debug view ON by default
 python main.py --no-debug # headless — recognition runs, no window
 python main.py --camera "iPhone Camera"   # use the iPhone as the camera
 python main.py --list-cameras             # show available camera devices
+python main.py --no-cursor                # disable the virtual-cursor overlay
+python main.py --timeout 60               # inactivity timeout in seconds
+python main.py --hotkey 97                # global hotkey (keycode) toggles Gesture Mode
 ```
 
 - The debug view shows the live feed, hand bounding boxes (both hands), landmarks, and status overlay.
 - Camera is captured at **640×480** with EMA landmark smoothing — reduced jitter and lag.
 - Press **`q`** or **Ctrl+C** to quit; **ESC** cancels a recording.
 - Camera permission: macOS may attribute access to your terminal app. If denied, enable Camera in System Settings → Privacy & Security → Camera for your terminal, then restart.
+
+### Virtual cursor (trackpad-style)
+
+Axis shows a **virtual cursor** — a click-through dot that roams the whole screen and is controlled with hand motion, trackpad-style:
+
+- **Relative** movement: small hand motions move the cursor; no absolute hand→screen mapping, no large arm sweeps.
+- **Hand stops → cursor stops**: a dead zone + One Euro filter suppress micro-tremor jitter.
+- **Click-through**: the overlay never intercepts real mouse input (it's a purely visual dot).
+- The same position is mirrored as a small dot on the debug-view frame for diagnostics.
+- Tuning lives in `axis/config/cursor.json` (gain, acceleration, dead zone, smoothing, dot size).
+
+### Gesture differentiation
+
+Scroll and zoom are disambiguated structurally — the engine first decides **palm translation vs. finger articulation**:
+
+- A **translating palm** is scroll (direction from net displacement).
+- A **stationary palm with changing thumb-index spread** is zoom in/out.
+- Learned embeddings refine the scroll direction (up/down/left/right) but never decide scroll vs. zoom.
+
+Thresholds live in `axis/config/differentiator.json` (path minimum, scroll displacement, zoom slope, margin, hysteresis).
 
 ### Using your iPhone as the camera
 
@@ -73,7 +96,7 @@ The camera index may change if devices reorder, which is why name-based selectio
 
 The debug view has a **navbar** with clickable buttons:
 
-- **Gesture selector** (first button, e.g. `Scroll Down ▼`) — click to open a **dropdown** listing all gestures: `Scroll Down`, `Scroll Up`, `Scroll Left`, `Scroll Right`, `Zoom In`, `Zoom Out`, `Custom`. Click an item to select it.
+- **Gesture selector** (first button, e.g. `Scroll Down [+]`) — click to open a **dropdown** listing all gestures: `Scroll Down`, `Scroll Up`, `Scroll Left`, `Scroll Right`, `Zoom In`, `Zoom Out`, `Custom`. Click an item to select it. Works exactly like an HTML `<select>` — tap to open, tap to choose.
 - **TRAIN / STOP** — starts / stops a training session.
 - **REC n** — shows how many 20-second windows have been recorded in this session.
 - **HAND: YES/NO** — live indicator that the hand is being tracked.
