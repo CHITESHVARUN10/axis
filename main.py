@@ -153,6 +153,22 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         help="disable the virtual-cursor overlay (default: on)",
     )
     parser.add_argument(
+        "--cursor-mode",
+        choices=["auto", "avatar", "real"],
+        default=None,
+        help="cursor mode: auto (best available), avatar (on-screen arrow, "
+        "click-through), real (moves the actual macOS cursor; needs "
+        "Accessibility permission)",
+    )
+    parser.add_argument(
+        "--clicks",
+        dest="clicks",
+        action="store_true",
+        default=False,
+        help="enable pinch-to-click (posts real clicks at the cursor; "
+        "requires real cursor mode + Accessibility permission)",
+    )
+    parser.add_argument(
         "--timeout",
         type=float,
         default=120.0,
@@ -230,16 +246,43 @@ def main(argv: Optional[list[str]] = None) -> int:
     prompt_thread: Optional[threading.Thread] = None
     train_gesture_name: Optional[str] = None  # gesture selected in the navbar
     continue_prompt_active = False
+    was_pinch = False
 
     # --- virtual cursor -------------------------------------------------
+    from axis.cursor import (
+        RelativePointer,
+        VirtualCursor,
+        load_cursor_config,
+        resolve_cursor_mode,
+    )
+    from axis.macos.accessibility import ensure_accessibility, print_accessibility_guidance
+    from axis.macos.real_cursor import RealCursorController
+
     cursor_config = load_cursor_config()
+    requested_mode = args.cursor_mode or cursor_config.mode
+    trusted = ensure_accessibility()
+    cursor_mode = resolve_cursor_mode(requested_mode, trusted)
+    if requested_mode in ("real", "auto") and not trusted:
+        print_accessibility_guidance()
     pointer = RelativePointer(cursor_config)
+    try:
+        from AppKit import NSScreen
+
+        s = NSScreen.mainScreen().frame()
+        pointer.set_screen(s.size.width, s.size.height)
+    except Exception:
+        pass  # keep pointer defaults
     overlay = VirtualCursor(cursor_config)
     overlay_on = args.cursor and overlay.start()
-    if overlay_on:
-        print("Virtual cursor overlay: on")
+    real_cursor: Optional[RealCursorController] = None
+    if args.cursor and cursor_mode == "real":
+        real_cursor = RealCursorController()
+        overlay.set_style("ring")  # marker over the real cursor
+        print("Cursor mode: real (moves the actual macOS cursor)")
+    elif overlay_on:
+        print("Cursor mode: avatar (click-through on-screen arrow)")
     else:
-        print("Virtual cursor overlay: disabled (or AppKit unavailable)")
+        print("Cursor overlay: disabled")
 
     # --- session gate (inactivity timeout) ------------------------------
     from axis.session.hotkey import HotkeyListener, SessionGate
@@ -277,7 +320,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                 gate.note_hand()
             session_active = gate.active
             cursor_pos = None
-            if overlay_on:
+            if overlay_on or real_cursor is not None:
                 if session_active and primary is not None:
                     # Palm center (normalized) → relative pointer.
                     lm = primary.landmarks
@@ -286,10 +329,23 @@ def main(argv: Optional[list[str]] = None) -> int:
                         float(np.mean(lm[[0, 5, 9, 13, 17], :2], axis=0)[1]),
                     )
                     cursor_pos = pointer.update(c)
-                    overlay.update(cursor_pos[0], cursor_pos[1], True)
+                    if real_cursor is not None:
+                        real_cursor.move_to(*cursor_pos)
+                    if overlay_on:
+                        overlay.update(cursor_pos[0], cursor_pos[1], True)
                 else:
                     pointer.reset()
-                    overlay.hide()
+                    if overlay_on:
+                        overlay.hide()
+            if overlay_on:
+                overlay.pump()
+
+            # Optional pinch-to-click (real mode only, edge-triggered).
+            if args.clicks and real_cursor is not None:
+                is_pinch = rec.kind == "pinch"
+                if is_pinch and not was_pinch:
+                    real_cursor.click("left")
+                was_pinch = is_pinch
 
             # Headless progress line.
             if not args.debug and (prompt_thread is None or not prompt_thread.is_alive()):
@@ -413,6 +469,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     finally:
         if overlay_on:
             overlay.stop()
+        if real_cursor is not None:
+            real_cursor.stop()
         if hotkey is not None:
             hotkey.stop()
         if view is not None:

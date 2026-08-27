@@ -28,7 +28,10 @@ python main.py            # debug view ON by default
 python main.py --no-debug # headless — recognition runs, no window
 python main.py --camera "iPhone Camera"   # use the iPhone as the camera
 python main.py --list-cameras             # show available camera devices
-python main.py --no-cursor                # disable the virtual-cursor overlay
+python main.py --no-cursor                # disable the cursor overlay + real cursor
+python main.py --cursor-mode avatar       # arrow-only, click-through (no permission)
+python main.py --cursor-mode real         # move the actual macOS cursor (Accessibility)
+python main.py --clicks                   # pinch → left-click at the cursor (real mode)
 python main.py --timeout 60               # inactivity timeout in seconds
 python main.py --hotkey 97                # global hotkey (keycode) toggles Gesture Mode
 ```
@@ -40,13 +43,21 @@ python main.py --hotkey 97                # global hotkey (keycode) toggles Gest
 
 ### Virtual cursor (trackpad-style)
 
-Axis shows a **virtual cursor** — a click-through dot that roams the whole screen and is controlled with hand motion, trackpad-style:
+Axis shows a **second cursor** on the whole screen, controlled by hand motion, trackpad-style:
 
-- **Relative** movement: small hand motions move the cursor; no absolute hand→screen mapping, no large arm sweeps.
-- **Hand stops → cursor stops**: a dead zone + One Euro filter suppress micro-tremor jitter.
-- **Click-through**: the overlay never intercepts real mouse input (it's a purely visual dot).
-- The same position is mirrored as a small dot on the debug-view frame for diagnostics.
-- Tuning lives in `axis/config/cursor.json` (gain, acceleration, dead zone, smoothing, dot size).
+```bash
+python main.py                     # auto mode: real if Accessibility granted, else avatar arrow
+python main.py --cursor-mode avatar # arrow-only, click-through, no permission needed
+python main.py --cursor-mode real   # moves the ACTUAL macOS cursor (needs Accessibility)
+python main.py --clicks             # pinch → left-click at the cursor (real mode)
+```
+
+- **Avatar cursor** (default without Accessibility): a macOS-style **arrow** (with a green ring when tracking, yellow when idle) roams the screen in a borderless, always-on-top, **click-through** window. It coexists with your real mouse cursor and stays visible even when the Axis camera window is minimized.
+- **Real cursor mode** (`--cursor-mode real` or `auto` with Accessibility granted): the hand moves the **actual macOS pointer** via Quartz — apps see hover states, and the optional `--clicks` flag turns a pinch into a left-click at the cursor. A small green ring marks the hand cursor.
+- **Relative** movement: small hand motions move the cursor; no absolute hand→screen mapping, no large arm sweeps; hand stops → cursor stops (dead zone + One Euro filter).
+- **Accessibility**: enable it in System Settings → Privacy & Security → Accessibility, add your terminal app, then relaunch. Without it the avatar arrow is used and guidance is printed once.
+- Tuning lives in `axis/config/cursor.json` (mode, gain, acceleration, dead zone, smoothing, arrow size).
+- The cursor position is mirrored as a small dot on the debug-view frame for diagnostics.
 
 ### Gesture differentiation
 

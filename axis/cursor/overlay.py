@@ -1,8 +1,19 @@
-"""Virtual cursor overlay — a click-through, always-on-top AppKit dot.
+"""Virtual cursor overlay — a click-through, always-on-top AppKit arrow.
 
-The dot is drawn in a borderless, transparent, click-through NSWindow so
-it never intercepts real mouse input. Runs on its own daemon thread with
-a running NSApplication event loop; position updates arrive via a queue.
+Draws a crisp macOS-style arrow cursor (like the real mouse cursor) in a
+borderless, transparent, click-through NSWindow so it never intercepts
+real mouse input.
+
+IMPORTANT (threading): AppKit forbids creating an NSWindow on anything but
+the main thread (NSInternalInconsistencyException). The overlay is therefore
+MAIN-THREAD DRIVEN: `start()` builds the window, the camera loop calls
+`update()`/`hide()` directly each frame, and `pump()` services the AppKit
+run loop so drawing actually lands. No daemon thread, no queue.
+
+Two visual styles:
+  - "arrow" (default) — the full arrow, the visible "second cursor".
+  - "ring"           — a small tracking ring only, used as a marker when
+                       the real macOS cursor itself is being moved.
 
 Color coding follows PRD §9.1:
   - green ring  — tracking active
@@ -11,92 +22,142 @@ Color coding follows PRD §9.1:
 
 from __future__ import annotations
 
-import queue
-import threading
 from typing import Optional, Tuple
 
 from axis.cursor.config import CursorConfig
 
+# --- AppKit view subclass (module-level, guarded for non-macOS) ----------
 
-class _CursorDotView:
-    """Minimal NSView that draws a filled circle with a ring.
+try:
+    import AppKit  # noqa: F401
+    import objc
 
-    Implemented with the Objective-C runtime so it works with the pyobjc
-    frameworks available in this project (no Cocoa subclassing needed).
-    """
+    _HAS_APPKIT = True
+except ImportError:  # pragma: no cover - non-macOS
+    _HAS_APPKIT = False
 
-    _cursor = None  # the VirtualCursor that owns this view
 
-    @classmethod
-    def set_owner(cls, owner) -> None:
-        cls._cursor = owner
+if _HAS_APPKIT:
 
-    @classmethod
-    def draw_(cls, view, rect) -> None:
-        try:
-            import AppKit
-            from Quartz import CGContextSetFillColor, CGContextSetStrokeColor
-            import Quartz
+    class _ArrowCursorView(AppKit.NSView):
+        """NSView that draws the macOS arrow (or a tracking ring)."""
 
-            owner = cls._cursor
+        owner = None  # VirtualCursor
+
+        def initWithFrame_(self, frame):
+            self = objc.super(_ArrowCursorView, self).initWithFrame_(frame)
+            if self is not None:
+                self.owner = None
+            return self
+
+        def isFlipped(self) -> bool:
+            # Top-left origin (+Y down) so arrow coordinates match the
+            # screen/cursor space directly.
+            return True
+
+        def drawRect_(self, rect):
+            owner = self.owner
             if owner is None:
                 return
-            ctx = AppKit.NSGraphicsContext.currentContext().CGContext()
-            w = rect.size.width
-            h = rect.size.height
+            try:
+                import Quartz
+
+                ctx = AppKit.NSGraphicsContext.currentContext().CGContext()
+                w = float(self.bounds().size.width)
+                h = float(self.bounds().size.height)
+
+                if owner._style == "ring":
+                    self._draw_ring(ctx, w, h, owner)
+                else:
+                    self._draw_arrow(ctx, w, h, owner, Quartz)
+            except Exception:
+                pass
+
+        def _draw_ring(self, ctx, w, h, owner) -> None:
+            import Quartz
+
             cx, cy = w / 2.0, h / 2.0
-            r = min(w, h) / 2.0 - 2.0
-            # Ring color by tracking state.
             color = owner._green if owner._active else owner._yellow
-            # Fill (opaque circle) + ring (stroke).
-            CGContextSetFillColor(ctx, color)
-            CGContextSetStrokeColor(ctx, (1.0, 1.0, 1.0, 0.9))
-            Quartz.CGContextAddArc(ctx, cx, cy, max(r, 1.0), 0.0, 6.283185307179586, 0)
+            Quartz.CGContextSetRGBStrokeColor(ctx, *color)
+            Quartz.CGContextSetLineWidth(ctx, 2.5)
+            Quartz.CGContextAddArc(ctx, cx, cy, min(w, h) / 2.0 - 2.0, 0.0, 6.283185307179586, 0)
+            try:
+                Quartz.CGContextStrokePath(ctx)
+            except Exception:
+                pass
+
+        def _draw_arrow(self, ctx, w, h, owner, Quartz) -> None:
+            """Draw the macOS pointer arrow (white fill + black outline)."""
+            s = owner._scale  # arrow scale factor (radius_px / 12)
+
+            # Classic macOS arrow silhouette in a 24x24 box with the tip at
+            # the TOP-LEFT and the body extending down-right (screen space,
+            # +Y down) — matching the real arrow cursor orientation.
+            pts = [
+                (0.0, 0.0), (23.0, 11.0), (16.0, 12.0), (18.0, 22.0),
+                (14.0, 23.0), (12.0, 14.0), (5.0, 19.0),
+            ]
+            pad = 2.0
+            poly = [(pad + px * s, pad + py * s) for px, py in pts]
+
+            path = Quartz.CGPathCreateMutable()
+            for i, (x, y) in enumerate(poly):
+                if i == 0:
+                    Quartz.CGPathMoveToPoint(path, None, x, y)
+                else:
+                    Quartz.CGPathAddLineToPoint(path, None, x, y)
+            Quartz.CGPathCloseSubpath(path)
+
+            Quartz.CGContextAddPath(ctx, path)
+            Quartz.CGContextSetRGBFillColor(ctx, 1.0, 1.0, 1.0, 0.95)
+            Quartz.CGContextSetRGBStrokeColor(ctx, 0.0, 0.0, 0.0, 0.9)
+            Quartz.CGContextSetLineWidth(ctx, 1.5)
             Quartz.CGContextDrawPath(ctx, Quartz.kCGPathFillStroke)
-        except Exception:
-            pass
+
+            # Tracking ring below the arrow tip.
+            cx, cy = poly[0][0] + 4.0, poly[0][1] + 4.0
+            color = owner._green if owner._active else owner._yellow
+            Quartz.CGContextSetRGBStrokeColor(ctx, *color)
+            Quartz.CGContextSetLineWidth(ctx, 2.0)
+            Quartz.CGContextAddArc(ctx, cx, cy, 3.0, 0.0, 6.283185307179586, 0)
+            Quartz.CGContextStrokePath(ctx)
 
 
 class VirtualCursor:
-    """Click-through overlay dot for the virtual cursor."""
+    """Click-through overlay arrow/ring. Main-thread driven (no daemon)."""
+
+    WINDOW = 28
 
     def __init__(self, config: Optional[CursorConfig] = None):
         self.config = config or CursorConfig()
         self._active = False
+        self._style = "arrow"
+        self._scale = self.config.radius_px / 12.0
         self._green = (0.0, 0.8, 0.2, 0.95)
         self._yellow = (0.95, 0.8, 0.1, 0.95)
-        self._queue: "queue.Queue[Optional[Tuple[float, float, bool]]]" = queue.Queue()
-        self._thread: Optional[threading.Thread] = None
         self._window = None
-        self._screen_h = 900.0
         self._view = None
+        self._screen_h = 900.0
 
-    # --- lifecycle ------------------------------------------------------
+    # --- lifecycle (call from the main thread) --------------------------
 
     def start(self) -> bool:
-        """Start the overlay thread. Returns False if AppKit isn't usable."""
-        try:
-            import AppKit  # noqa: F401
-        except ImportError:
+        """Create the overlay window. Returns False if AppKit is unusable.
+
+        Must be called from the main thread (AppKit requirement).
+        """
+        if not _HAS_APPKIT:
             return False
-        if self._thread is not None and self._thread.is_alive():
+        if self._window is not None:
             return True
-        _CursorDotView.set_owner(self)
-        self._thread = threading.Thread(target=self._run, daemon=True)
-        self._thread.start()
-        return True
-
-    def _run(self) -> None:
-        """AppKit event loop on a daemon thread; drains the position queue."""
         try:
-            import AppKit
-
             app = AppKit.NSApplication.sharedApplication()
             screen = AppKit.NSScreen.mainScreen().frame()
             self._screen_h = float(screen.size.height)
 
+            w = self.WINDOW
             self._window = AppKit.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-                ((0, 0), (self.config.radius_px * 2, self.config.radius_px * 2)),
+                ((0, 0), (w, w)),
                 AppKit.NSWindowStyleMaskBorderless,
                 AppKit.NSBackingStoreBuffered,
                 False,
@@ -107,49 +168,60 @@ class VirtualCursor:
             self._window.setIgnoresMouseEvents_(True)
             self._window.setHasShadow_(False)
 
-            self._view = AppKit.NSView.alloc().initWithFrame_(
-                ((0, 0), (self.config.radius_px * 2, self.config.radius_px * 2))
-            )
+            self._view = _ArrowCursorView.alloc().initWithFrame_(((0, 0), (w, w)))
+            self._view.owner = self
             self._window.setContentView_(self._view)
             self._window.orderFrontRegardless()
-
-            while True:
-                try:
-                    item = self._queue.get(timeout=0.05)
-                except queue.Empty:
-                    item = None
-                if item is not None:
-                    self._move(item)
-                app.run() if False else None  # process events via nextEvent
-                # Pump the run loop manually so the thread stays responsive
-                # to both the queue and AppKit event processing.
-                import time as _t
-                _t.sleep(0.005)
+            return True
         except Exception:
-            pass
+            self._window = None
+            return False
 
-    def _move(self, item: Tuple[float, float, bool]) -> None:
-        x, y, active = item
+    def update(self, x: float, y: float, active: bool) -> None:
+        """Position the arrow tip at (x, y) — top-left screen points."""
         self._active = active
         if self._window is None:
             return
-        r = self.config.radius_px
-        origin = (x - r, self._screen_h - y - r)
+        if self._view is not None:
+            self._view.setNeedsDisplay_(True)
+        # Window is 28x28; tip drawn 2pt from its top-left (flipped view).
+        # AppKit frame origin is the window's bottom-left:
+        #   screen_y_from_top(origin) = screen_h - origin.y - 26
+        # so screen_x = origin.x + 2 → origin.x = x - 2, and
+        # screen_y = origin.y + 26 flipped → origin.y = screen_h - y - 26.
+        origin = (x - 2.0, self._screen_h - y - 26.0)
         self._window.setFrameOrigin_(origin)
 
-    # --- API ------------------------------------------------------------
+    def pump(self, seconds: float = 0.005) -> None:
+        """Service the AppKit run loop so drawing lands; call each frame."""
+        if self._window is None:
+            return
+        try:
+            rl = AppKit.NSRunLoop.currentRunLoop()
+            rl.runMode_beforeDate_(
+                AppKit.NSDefaultRunLoopMode,
+                AppKit.NSDate.dateWithTimeIntervalSinceNow_(seconds),
+            )
+        except Exception:
+            pass
 
-    def update(self, x: float, y: float, active: bool) -> None:
-        """Queue a position update (screen points, top-left origin)."""
-        self._queue.put((x, y, active))
+    def set_style(self, style: str) -> None:
+        """'arrow' (default) or 'ring' (marker when the real cursor moves)."""
+        self._style = "ring" if style == "ring" else "arrow"
+        if self._view is not None:
+            self._view.setNeedsDisplay_(True)
+
+    def show(self) -> None:
+        if self._window is not None:
+            self._window.orderFrontRegardless()
 
     def hide(self) -> None:
-        self._queue.put(None)
         self._active = False
+        if self._window is not None:
+            self._window.orderOut_(None)
 
     def stop(self) -> None:
         self.hide()
-        # The daemon thread exits with the process; nothing to join.
 
 
 __all__ = ["VirtualCursor"]

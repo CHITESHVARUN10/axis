@@ -134,4 +134,5 @@ def test_load_cursor_config_defaults():
 
     cfg = load_cursor_config(pathlib.Path("/nonexistent/cursor.json"))
     assert cfg.base_gain == 1.5
-    assert cfg.radius_px == 8
+    assert cfg.radius_px == 12
+    assert cfg.mode == "auto"

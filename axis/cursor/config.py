@@ -12,6 +12,7 @@ from typing import Optional
 class CursorConfig:
     """Tunable parameters for the virtual cursor."""
 
+    mode: str = "auto"           # auto | avatar | real
     base_gain: float = 1.5
     accel: float = 0.0
     accel_power: float = 1.0
@@ -19,7 +20,7 @@ class CursorConfig:
     min_cutoff: float = 1.2
     beta: float = 0.03
     d_cutoff: float = 1.0
-    radius_px: int = 8
+    radius_px: int = 12
     screen_clamp_margin_px: int = 4
 
     @classmethod
@@ -27,6 +28,7 @@ class CursorConfig:
         gain = d.get("gain", {})
         smoothing = d.get("smoothing", {})
         return cls(
+            mode=str(d.get("mode", "auto")),
             base_gain=float(gain.get("base", 1.5)),
             accel=float(gain.get("accel", 0.0)),
             accel_power=float(gain.get("accel_power", 1.0)),
@@ -34,9 +36,24 @@ class CursorConfig:
             min_cutoff=float(smoothing.get("min_cutoff", 1.2)),
             beta=float(smoothing.get("beta", 0.03)),
             d_cutoff=float(smoothing.get("d_cutoff", 1.0)),
-            radius_px=int(d.get("radius_px", 8)),
+            radius_px=int(d.get("radius_px", 12)),
             screen_clamp_margin_px=int(d.get("screen_clamp_margin_px", 4)),
         )
+
+
+def resolve_cursor_mode(mode: str, trusted: bool) -> str:
+    """Resolve the effective cursor mode (pure, unit-testable).
+
+    - auto  → "real" if Accessibility is trusted, else "avatar"
+    - avatar → always avatar (no permission needed)
+    - real  → real when trusted, degrades to "avatar" otherwise
+    """
+    mode = (mode or "auto").lower()
+    if mode == "auto":
+        return "real" if trusted else "avatar"
+    if mode == "real":
+        return "real" if trusted else "avatar"
+    return "avatar"
 
 
 def load_cursor_config(path: Optional[Path] = None) -> CursorConfig:
@@ -51,4 +68,4 @@ def load_cursor_config(path: Optional[Path] = None) -> CursorConfig:
         return CursorConfig()
 
 
-__all__ = ["CursorConfig", "load_cursor_config"]
+__all__ = ["CursorConfig", "load_cursor_config", "resolve_cursor_mode"]

@@ -1,13 +1,15 @@
 """macOS Accessibility permission helper (PRD §10).
 
-Not required for the click-through virtual cursor, but needed later for
-real cursor/clicks/scroll. Checks AXIsProcessTrusted() and prints clear
-instructions on first run.
+Needed for real cursor/clicks/scroll (moving the actual macOS pointer via
+Quartz requires the process to be a trusted Accessibility client since
+macOS 10.14). The click-through avatar cursor does NOT need it.
 """
 
 from __future__ import annotations
 
 import sys
+
+_GUIDANCE_SHOWN = False
 
 
 def is_accessibility_trusted() -> bool:
@@ -21,17 +23,27 @@ def is_accessibility_trusted() -> bool:
         return True
 
 
-def ensure_accessibility() -> bool:
-    """Check trust; if missing, print instructions. Returns True if trusted."""
-    if is_accessibility_trusted():
-        return True
+def print_accessibility_guidance() -> None:
+    """Print the enable-accessibility instructions (once per process)."""
+    global _GUIDANCE_SHOWN
+    if _GUIDANCE_SHOWN:
+        return
+    _GUIDANCE_SHOWN = True
     print(
-        "\nAxis needs Accessibility permission for future cursor/click/scroll "
-        "actions.\n"
+        "\nAxis needs Accessibility permission for real-cursor control "
+        "(hovering over apps, clicks).\n"
         "Enable it in System Settings → Privacy & Security → Accessibility,\n"
-        "then restart Axis.\n"
+        "add your terminal app, then relaunch Axis. Until then, the avatar\n"
+        "cursor will be shown instead.\n"
     )
-    return False
 
 
-__all__ = ["is_accessibility_trusted", "ensure_accessibility"]
+def ensure_accessibility() -> bool:
+    """Check trust; if missing, print guidance once. Returns True if trusted."""
+    trusted = is_accessibility_trusted()
+    if not trusted:
+        print_accessibility_guidance()
+    return trusted
+
+
+__all__ = ["is_accessibility_trusted", "print_accessibility_guidance", "ensure_accessibility"]

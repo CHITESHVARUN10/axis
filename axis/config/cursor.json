@@ -1,6 +1,7 @@
 {
   "version": 1,
   "schema": "axis.cursor.v1",
+  "mode": "auto",
   "gain": {
     "base": 1.5,
     "accel": 0.0,
@@ -12,6 +13,6 @@
     "beta": 0.03,
     "d_cutoff": 1.0
   },
-  "radius_px": 8,
+  "radius_px": 12,
   "screen_clamp_margin_px": 4
 }
