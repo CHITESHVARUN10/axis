@@ -14,13 +14,14 @@ _GUIDANCE_SHOWN = False
 
 def is_accessibility_trusted() -> bool:
     """True if this process has macOS Accessibility trust."""
+    if sys.platform != "darwin":
+        return False
     try:
         import ApplicationServices
 
         return bool(ApplicationServices.AXIsProcessTrusted())
     except (ImportError, AttributeError):
-        # Fallback: cannot determine → treat as trusted so the app runs.
-        return True
+        return False
 
 
 def print_accessibility_guidance() -> None:

@@ -41,6 +41,7 @@ from axis.gestures.definitions import (
     SCROLL_PAIRS,
     distance_to,
     finger_pattern,
+    is_scroll_shape,
     matches,
     normalized_signature,
     palm_size,
@@ -59,10 +60,10 @@ SPREAD_MIN_RATIO = 0.50
 # Pinch: tip distance / palm size below this.
 PINCH_MAX_RATIO = 0.40
 # Scroll: vertical velocity of the palm, in palm-sizes per frame.
-SCROLL_MIN_SPEED = 0.05
+SCROLL_MIN_SPEED = 0.03
 # Stroke latch: minimum net displacement (in palm-sizes) before direction
 # is declared. Kills the up/down flapping on near-zero motion.
-STROKE_MIN_DISPLACEMENT = 0.25
+STROKE_MIN_DISPLACEMENT = 0.18
 # Stroke latch: frames the hand must stay below SCROLL_MIN_SPEED before
 # the latched direction resets.
 STROKE_RESET_FRAMES = 6
@@ -74,7 +75,8 @@ MIN_HAND_SIZE_RATIO = 0.04
 # frames before it counts (reduces flicker between pinch/fist/open-palm).
 STATIC_DEBOUNCE_FRAMES = 3
 # A hand can scroll if index+middle are both extended (covers full palm,
-# two/three-finger scrolls, angled hands).
+# two/three-finger scrolls, angled hands). The strict two-finger split
+# (is_scroll_shape) lives in the differentiator; this latch stays relaxed.
 SCROLL_MIN_FINGERS = FINGER_INDEX | FINGER_MIDDLE
 
 
@@ -144,10 +146,12 @@ def is_fist_shape(lm: np.ndarray) -> bool:
 
 
 def can_scroll(lm: np.ndarray) -> bool:
-    """True if the hand shape is scroll-compatible (index+middle extended).
+    """True if the hand shape can drive the scroll latch (index+middle out).
 
-    Relaxed: accepts a full open palm, two-finger (index+middle), three-
-    finger, and angled hands — any shape where index+middle are out.
+    Relaxed on purpose: the latch tracks direction for any extended hand,
+    while the differentiator applies the strict two-finger gate before
+    anything scrolls. A full open palm therefore keeps a stable latched
+    direction but NEVER fires scroll — it moves the cursor instead.
     """
     mask = finger_pattern(lm)
     return (mask & SCROLL_MIN_FINGERS) == SCROLL_MIN_FINGERS
@@ -244,7 +248,9 @@ class GestureRecognizer:
         lm = hand.landmarks
         if not can_scroll(lm):
             self._scroll.pop(self._hand_key(hand), None)
+            self._scroll_direction = ""
             return "none", 0.0, ""
+        key = self._hand_key(hand)
 
         size = palm_size(lm)
         if size <= 1e-6:
@@ -289,13 +295,15 @@ class GestureRecognizer:
             else:
                 direction = "right" if dx > 0 else "left"
             st["latched"] = direction
+            self._scroll_direction = direction
 
         # Latched direction persists until the hand stops. Return it (kind
         # is informational; the differentiator decides final kind).
-        return "none", 0.0, st["latched"]
+        return "none", 0.0, st["latched"] or self._scroll_direction
 
     def _reset_scroll(self) -> None:
         self._scroll.clear()
+        self._scroll_direction = ""
 
     # --- registration ---------------------------------------------------
 

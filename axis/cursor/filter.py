@@ -57,7 +57,7 @@ class OneEuroFilter:
 def deadzone(dx: float, dy: float, radius: float) -> Tuple[float, float]:
     """Circular dead zone: zero inside the radius, smooth ramp outside."""
     m = math.hypot(dx, dy)
-    if m < radius:
+    if m == 0.0 or m < radius:
         return 0.0, 0.0
     s = (m - radius) / m
     return dx * s, dy * s

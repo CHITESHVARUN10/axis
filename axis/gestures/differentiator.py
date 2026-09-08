@@ -28,9 +28,12 @@ import numpy as np
 from axis.gestures.definitions import (
     FINGER_INDEX,
     FINGER_MIDDLE,
+    FINGER_PINKY,
+    FINGER_THUMB,
     MotionRegistry,
     MotionTemplate,
     finger_pattern,
+    is_scroll_shape,
     palm_size,
 )
 from axis.gestures.embedding import embedding_distance, path_embedding
@@ -42,7 +45,8 @@ PALM_CENTER_IDX = [0, 5, 9, 13, 17]
 THUMB_TIP = 4
 INDEX_TIP = 8
 
-# Scroll requires index + middle extended (fist / pinch never scroll).
+# Scroll requires the two-finger pose: index + middle extended, ring +
+# pinky folded. A full open palm NEVER scrolls — it moves the cursor.
 SCROLL_MIN_FINGERS = FINGER_INDEX | FINGER_MIDDLE
 
 
@@ -52,7 +56,7 @@ class DifferentiatorConfig:
 
     window_frames: int = 12
     path_min: float = 0.15        # below this: static branch
-    scroll_disp_min: float = 0.25  # net displacement to declare scroll
+    scroll_disp_min: float = 0.18  # net displacement to declare scroll
     zoom_slope_min: float = 0.02  # normalized spread-ratio change / frame
     margin: float = 0.10           # best vs second-best learned score gap
     min_score: float = 0.35        # absolute score floor for learned classes
@@ -193,11 +197,16 @@ class MotionDifferentiator:
         if f["L"] < self.config.path_min:
             return self._hysteresis("static", "", 0.0) + ("",)
 
-        # 3) Scroll branch: palm translating with a scroll-compatible hand.
-        if (
-            (f["mask"] & SCROLL_MIN_FINGERS) == SCROLL_MIN_FINGERS
-            and np.hypot(*f["D"]) >= self.config.scroll_disp_min
-        ):
+        # 3) Scroll branch: two-finger palm translating. The shape gate is
+        #    strict (index + middle out, pinky + thumb folded) so a moving
+        #    open palm NEVER scrolls — it moves the cursor instead.
+        w = self._window
+        scroll_shape = False
+        if w.masks:
+            scroll_shape = (w.masks[-1] & SCROLL_MIN_FINGERS) == SCROLL_MIN_FINGERS and not (
+                w.masks[-1] & (FINGER_PINKY | FINGER_THUMB)
+            )
+        if scroll_shape and np.hypot(*f["D"]) >= self.config.scroll_disp_min:
             kind, direction, score, label = self._scroll_classify(f, motions)
             kind, direction, score = self._hysteresis(kind, direction, score)
             return kind, direction, score, label

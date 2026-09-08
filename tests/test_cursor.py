@@ -54,9 +54,9 @@ def test_one_euro_tracks_ramp():
 
 
 def test_gain_curve_linear_default():
-    dx, dy = gain_curve(2.0, 1.0, base=1.5, accel=0.0)
-    assert abs(dx - 3.0) < 1e-9
-    assert abs(dy - 1.5) < 1e-9
+    dx, dy = gain_curve(2.0, 1.0, base=2.5, accel=0.0)
+    assert abs(dx - 5.0) < 1e-9
+    assert abs(dy - 2.5) < 1e-9
 
 
 # --- RelativePointer ---------------------------------------------------------
@@ -133,6 +133,6 @@ def test_load_cursor_config_defaults():
     import pathlib
 
     cfg = load_cursor_config(pathlib.Path("/nonexistent/cursor.json"))
-    assert cfg.base_gain == 1.5
+    assert cfg.base_gain == 2.5
     assert cfg.radius_px == 12
     assert cfg.mode == "auto"

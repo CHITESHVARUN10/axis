@@ -1,6 +1,12 @@
 {
   "version": 1,
   "schema": "axis.actions.v1",
-  "notes": "Action Registry (PRD §8.3). Gesture → Action → Action Handler. Mappings live here, never in code. Populated in Phase 2+.",
-  "bindings": {}
+  "notes": "Action Registry (PRD §8.3). Gesture → Action → Action Handler. Mappings live here, never in code.",
+  "bindings": {
+    "open_palm": "cursor-move",
+    "pinch": "click-left",
+    "pinch-hold-move": "drag",
+    "scroll": "scroll-wheel",
+    "fist": "clutch"
+  }
 }

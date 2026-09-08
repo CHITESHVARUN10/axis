@@ -22,7 +22,15 @@ def test_map_to_global_is_identity():
 # --- mode resolution ----------------------------------------------------
 
 def test_resolve_auto_trusted_real():
-    assert resolve_cursor_mode("auto", trusted=True) == "real"
+    assert resolve_cursor_mode("auto", trusted=True) == "control"
+
+
+def test_resolve_control_trusted_stays_control():
+    assert resolve_cursor_mode("control", trusted=True) == "control"
+
+
+def test_resolve_control_untrusted_degrades_to_avatar():
+    assert resolve_cursor_mode("control", trusted=False) == "avatar"
 
 
 def test_resolve_auto_untrusted_avatar():
@@ -43,7 +51,7 @@ def test_resolve_avatar_always_avatar():
 
 
 def test_resolve_default_auto():
-    assert resolve_cursor_mode(None, trusted=True) == "real"
+    assert resolve_cursor_mode(None, trusted=True) == "control"
     assert resolve_cursor_mode("", trusted=False) == "avatar"
 
 

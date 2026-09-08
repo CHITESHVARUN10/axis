@@ -79,8 +79,29 @@ def test_spread_shape():
 
 
 def test_can_scroll():
-    assert can_scroll(_synthetic(spread=True))     # open palm scrolls
-    assert not can_scroll(_synthetic(fist=True))   # fist can't scroll
+    assert can_scroll(_synthetic(spread=True))    # open palm drives the latch
+    assert not can_scroll(_synthetic(fist=True))  # fist can't scroll
+
+
+def _two_finger():
+    """Two-finger scroll pose: index + middle out, pinky folded, thumb tucked."""
+    lm = _synthetic(spread=True)
+    palm = lm[[0, 5, 9, 13, 17], :2].mean(axis=0)
+    for i in (20, 4):
+        lm[i, :2] = palm + (lm[i, :2] - palm) * 0.2
+    return lm
+
+
+def test_can_scroll_two_finger():
+    assert can_scroll(_two_finger())
+
+
+def test_scroll_shape_split():
+    from axis.gestures import is_move_shape, is_scroll_shape
+
+    assert not is_scroll_shape(_synthetic(spread=True))
+    assert is_scroll_shape(_two_finger())
+    assert not is_move_shape(_two_finger())
 
 
 def _recognizer(motions=None) -> GestureRecognizer:
@@ -123,14 +144,26 @@ def test_recognize_fist_is_known():
 
 def test_scroll_detection():
     rec = _recognizer()
-    lm = _synthetic(spread=True)
+    lm = _two_finger()
     rec.recognize([_hand(lm)])
     out = None
-    for i in range(1, 9):
+    for i in range(1, 12):
         lm = lm + np.array([0.0, -0.05, 0.0])
         out = rec.recognize([_hand(lm)])
     assert out.kind == "scroll"
     assert out.scroll_direction in ("up", "down")
+
+
+def test_open_palm_moving_never_scrolls():
+    """Moving an open palm must NOT scroll — it moves the cursor."""
+    rec = _recognizer()
+    lm = _synthetic(spread=True)
+    rec.recognize([_hand(lm)])
+    out = None
+    for i in range(1, 12):
+        lm = lm + np.array([0.0, 0.05, 0.0])
+        out = rec.recognize([_hand(lm)])
+    assert out.kind != "scroll"
 
 
 def test_moving_fist_does_not_scroll():
@@ -167,10 +200,10 @@ def test_motion_template_matches():
         )
     )
     rec = _recognizer(motions=motions)
-    lm = _synthetic(spread=True)
+    lm = _two_finger()
     rec.recognize([_hand(lm)])
     out = None
-    for i in range(1, 9):
+    for i in range(1, 12):
         lm = lm + np.array([0.0, 0.05, 0.0])  # down (y increasing in frame)
         out = rec.recognize([_hand(lm)])
     assert out.kind == "scroll"
@@ -190,10 +223,10 @@ def test_motion_template_wrong_direction_no_match():
         )
     )
     rec = _recognizer(motions=motions)
-    lm = _synthetic(spread=True)
+    lm = _two_finger()
     rec.recognize([_hand(lm)])
     out = None
-    for i in range(1, 9):
+    for i in range(1, 12):
         lm = lm + np.array([0.0, -0.05, 0.0])  # up
         out = rec.recognize([_hand(lm)])
     assert out.label != "Scroll Down"
@@ -216,11 +249,11 @@ def test_recorder_captures_direction():
 def test_stroke_latch_no_flap():
     """Direction latches: jitter around zero doesn't flip up/down."""
     rec = _recognizer()
-    lm = _synthetic(spread=True)
+    lm = _two_finger()
     rec.recognize([_hand(lm)])
     out = None
     # Move down with small wobbles (0.01 up/down noise) but net downward.
-    for i in range(12):
+    for i in range(14):
         wobble = 0.01 * (1 if i % 3 == 0 else -1)
         lm = lm + np.array([0.0, 0.04 + wobble, 0.0])
         out = rec.recognize([_hand(lm)])
@@ -237,10 +270,10 @@ def test_stroke_latch_no_flap():
 def test_horizontal_scroll():
     """Horizontal (left/right) motion scrolls."""
     rec = _recognizer()
-    lm = _synthetic(spread=True)
+    lm = _two_finger()
     rec.recognize([_hand(lm)])
     out = None
-    for i in range(1, 9):
+    for i in range(1, 12):
         lm = lm + np.array([0.05, 0.0, 0.0])  # right
         out = rec.recognize([_hand(lm)])
     assert out.kind == "scroll"

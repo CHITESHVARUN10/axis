@@ -77,7 +77,7 @@ if _HAS_APPKIT:
             import Quartz
 
             cx, cy = w / 2.0, h / 2.0
-            color = owner._green if owner._active else owner._yellow
+            color = owner.ring_color()
             Quartz.CGContextSetRGBStrokeColor(ctx, *color)
             Quartz.CGContextSetLineWidth(ctx, 2.5)
             Quartz.CGContextAddArc(ctx, cx, cy, min(w, h) / 2.0 - 2.0, 0.0, 6.283185307179586, 0)
@@ -116,7 +116,7 @@ if _HAS_APPKIT:
 
             # Tracking ring below the arrow tip.
             cx, cy = poly[0][0] + 4.0, poly[0][1] + 4.0
-            color = owner._green if owner._active else owner._yellow
+            color = owner.ring_color()
             Quartz.CGContextSetRGBStrokeColor(ctx, *color)
             Quartz.CGContextSetLineWidth(ctx, 2.0)
             Quartz.CGContextAddArc(ctx, cx, cy, 3.0, 0.0, 6.283185307179586, 0)
@@ -135,6 +135,9 @@ class VirtualCursor:
         self._scale = self.config.radius_px / 12.0
         self._green = (0.0, 0.8, 0.2, 0.95)
         self._yellow = (0.95, 0.8, 0.1, 0.95)
+        self._blue = (0.2, 0.5, 1.0, 0.95)
+        self._purple = (0.7, 0.3, 0.9, 0.95)
+        self._tint = None
         self._window = None
         self._view = None
         self._screen_h = 900.0
@@ -210,6 +213,30 @@ class VirtualCursor:
         self._style = "ring" if style == "ring" else "arrow"
         if self._view is not None:
             self._view.setNeedsDisplay_(True)
+
+    def set_state(self, state: str) -> None:
+        """Tint the ring for a control-mode state (PRD §9.1).
+
+        tracking → green, clutched/idle → yellow, dragging → blue,
+        scrolling → purple. Unknown states clear the override.
+        """
+        tints = {
+            "tracking": self._green,
+            "clutched": self._yellow,
+            "idle": self._yellow,
+            "dragging": self._blue,
+            "scrolling": self._purple,
+        }
+        self._tint = tints.get(state)
+        self._active = state in ("tracking", "dragging", "scrolling")
+        if self._view is not None:
+            self._view.setNeedsDisplay_(True)
+
+    def ring_color(self):
+        """Active ring color (tint override wins; testable without AppKit)."""
+        if self._tint is not None:
+            return self._tint
+        return self._green if self._active else self._yellow
 
     def show(self) -> None:
         if self._window is not None:

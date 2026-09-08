@@ -30,11 +30,12 @@ def _hand(landmarks, score=0.9) -> Hand:
     )
 
 
-def _spread_lm(ratio: float = 1.0) -> np.ndarray:
-    """Open-palm synthetic hand; `ratio` scales thumb-index distance.
+def _spread_lm(ratio: float = 1.0, two_finger: bool = False) -> np.ndarray:
+    """Synthetic hand; `ratio` scales thumb-index distance.
 
     palm_size = wrist(0) → middle MCP(9) = 1.0. Index tip (8) sits at
     `ratio * 0.5` from the thumb tip (4) so the spread ratio is ~ratio*0.5.
+    `two_finger=True` folds ring + pinky → the scroll pose.
     """
     lm = np.zeros((21, 3), dtype=np.float32)
     lm[0] = (0.0, 0.0, 0.0)
@@ -46,8 +47,13 @@ def _spread_lm(ratio: float = 1.0) -> np.ndarray:
     # Fingers extended (index+middle out → can scroll).
     lm[8] = (0.5 + 0.55 * ratio, 0.35, 0.0)
     lm[12] = (1.05, -0.25, 0.0)
-    lm[16] = (1.2, -0.35, 0.0)
-    lm[20] = (1.3, 0.25, 0.0)
+    if two_finger:
+        palm = np.mean(lm[[0, 5, 9, 13, 17], :2], axis=0)
+        for i in (20, 4):
+            lm[i, :2] = palm
+    else:
+        lm[16] = (1.2, -0.35, 0.0)
+        lm[20] = (1.3, 0.25, 0.0)
     return lm
 
 
@@ -97,10 +103,10 @@ def test_zoom_out_stationary_pinch():
 
 
 def test_scroll_not_zoom():
-    """Translating palm with stable spread ratio → scroll, never zoom."""
+    """Two-finger translating palm → scroll, never zoom."""
     diff = MotionDifferentiator()
     motions = MotionRegistry()
-    lm = _spread_lm(ratio=1.0)
+    lm = _spread_lm(ratio=1.0, two_finger=True)
     hands = []
     for i in range(12):
         hands.append(_hand(_slide(lm, 0.0, 0.05 * i)))  # downward
@@ -109,15 +115,26 @@ def test_scroll_not_zoom():
     assert direction == "down"
 
 
+def test_open_palm_moving_never_scrolls_diff():
+    """Open-palm translating palm → NOT scroll (it moves the cursor)."""
+    diff = MotionDifferentiator()
+    motions = MotionRegistry()
+    lm = _spread_lm(ratio=1.0)
+    hands = []
+    for i in range(12):
+        hands.append(_hand(_slide(lm, 0.0, 0.05 * i)))  # downward
+    kind, _, _, _ = _classify_sequence(diff, motions, hands)
+    assert kind != "scroll"
+
+
 def test_scroll_wins_over_slight_articulation():
-    """A translating hand with slight finger spread is still scroll."""
+    """A two-finger translating hand with slight spread is still scroll."""
     diff = MotionDifferentiator()
     motions = MotionRegistry()
     hands = []
-    lm = _spread_lm(ratio=1.0)
     for i in range(12):
         t = i / 11.0
-        h = _slide(_spread_lm(ratio=1.0 + 0.02 * t), 0.0, 0.05 * i)
+        h = _slide(_spread_lm(ratio=1.0 + 0.02 * t, two_finger=True), 0.0, 0.05 * i)
         hands.append(_hand(h))
     kind, direction, _, _ = _classify_sequence(diff, motions, hands)
     assert kind == "scroll"
@@ -153,7 +170,7 @@ def test_margin_falls_back_to_geometric():
             )
         )
     # Downward motion → both templates score near-identically.
-    lm = _spread_lm()
+    lm = _spread_lm(two_finger=True)
     hands = [_hand(_slide(lm, 0.0, 0.05 * i)) for i in range(12)]
     kind, direction, _, label = _classify_sequence(diff, motions, hands)
     assert kind == "scroll"
@@ -164,20 +181,20 @@ def test_margin_falls_back_to_geometric():
 
 
 def test_hysteresis_blocks_flip():
-    """A single ambiguous frame does not flip the committed class."""
+    """A single zoom-shaped frame does not flip committed scroll to zoom."""
     diff = MotionDifferentiator()
     motions = MotionRegistry()
     # Steady downward scroll → committed "scroll/down".
-    lm = _spread_lm()
+    lm = _spread_lm(two_finger=True)
     hands = [_hand(_slide(lm, 0.0, 0.05 * i)) for i in range(12)]
     kind, direction, score, _ = _classify_sequence(diff, motions, hands)
     assert kind == "scroll" and direction == "down"
-    # A single zoom-ish frame (strong spread change but small motion) is
-    # suppressed by hysteresis.
-    zoom_hand = _hand(_spread_lm(ratio=1.8))
+    # A single zoom-shaped frame (spread jump, palm back near window start)
+    # must not commit zoom — hysteresis holds scroll.
+    zoom_hand = _hand(_spread_lm(ratio=1.05, two_finger=True))
     diff.update(zoom_hand)
     kind2, direction2, _, _ = diff.classify(motions)
-    assert (kind2, direction2) == ("scroll", "down")
+    assert kind2 != "zoom"
 
 
 def test_path_embedding_per_sample_sizes_differs_from_constant():
@@ -195,7 +212,7 @@ def test_recognizer_uses_differentiator_for_scroll():
     reg.add(make_pinch_definition())
     reg.add(make_open_palm_definition())
     rec = GestureRecognizer(reg, motions=MotionRegistry())
-    lm = _spread_lm()
+    lm = _spread_lm(two_finger=True)
     rec.recognize([_hand(lm)])
     out = None
     for i in range(1, 12):

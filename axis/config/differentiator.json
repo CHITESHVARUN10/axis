@@ -3,7 +3,7 @@
   "schema": "axis.differentiator.v1",
   "window_frames": 12,
   "path_min": 0.15,
-  "scroll_disp_min": 0.25,
+  "scroll_disp_min": 0.18,
   "zoom_slope_min": 0.02,
   "margin": 0.10,
   "min_score": 0.35,

@@ -48,6 +48,48 @@ class RealCursorController:
         except Exception:
             return False
 
+    def get_position(self) -> Tuple[float, float]:
+        """Read the live OS cursor position (top-left screen points).
+
+        Syncs the cached `_pos` so a RelativePointer can re-anchor to
+        where the mouse/trackpad left the cursor (kills warp jumps).
+        Falls back to the cached position when Quartz is unavailable.
+        """
+        try:
+            import Quartz
+
+            ev = Quartz.CGEventCreate(None)
+            if ev is None:
+                return self._pos
+            pt = Quartz.CGEventGetLocation(ev)
+            try:
+                x, y = float(pt.x), float(pt.y)
+            except AttributeError:
+                x, y = float(pt[0]), float(pt[1])
+            self._pos = (x, y)
+            return self._pos
+        except Exception:
+            return self._pos
+
+    @staticmethod
+    def _button_kinds(button: str):
+        """Return (down, up, dragged, btn) Quartz constants for a button."""
+        import Quartz
+
+        if button == "right":
+            return (
+                Quartz.kCGEventRightMouseDown,
+                Quartz.kCGEventRightMouseUp,
+                Quartz.kCGEventRightMouseDragged,
+                Quartz.kCGMouseButtonRight,
+            )
+        return (
+            Quartz.kCGEventLeftMouseDown,
+            Quartz.kCGEventLeftMouseUp,
+            Quartz.kCGEventLeftMouseDragged,
+            Quartz.kCGMouseButtonLeft,
+        )
+
     # --- actions --------------------------------------------------------
 
     def move_to(self, x: float, y: float) -> bool:
@@ -73,27 +115,80 @@ class RealCursorController:
         try:
             import Quartz
 
-            if button == "right":
-                kinds = (Quartz.kCGEventRightMouseDown, Quartz.kCGEventRightMouseUp)
-                btn = Quartz.kCGMouseButtonRight
-            else:
-                kinds = (Quartz.kCGEventLeftMouseDown, Quartz.kCGEventLeftMouseUp)
-                btn = Quartz.kCGMouseButtonLeft
-            for kind in kinds:
+            down, up, _, btn = self._button_kinds(button)
+            for kind in (down, up):
                 ev = Quartz.CGEventCreateMouseEvent(None, kind, self._pos, btn)
                 Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
             return True
         except Exception:
             return False
 
-    def scroll(self, dy: float) -> bool:
-        """Post a vertical scroll-wheel event (positive = scroll up)."""
+    def mouse_down(self, button: str = "left") -> bool:
+        """Post a mouse-down at the current position (drag start)."""
+        if button not in ("left", "right"):
+            button = "left"
         try:
             import Quartz
 
-            ev = Quartz.CGEventCreateScrollWheelEvent(
-                None, Quartz.kCGScrollEventUnitLine, 1, int(dy)
-            )
+            down, _, _, btn = self._button_kinds(button)
+            ev = Quartz.CGEventCreateMouseEvent(None, down, self._pos, btn)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+            return True
+        except Exception:
+            return False
+
+    def mouse_up(self, button: str = "left") -> bool:
+        """Post a mouse-up at the current position (drag end)."""
+        if button not in ("left", "right"):
+            button = "left"
+        try:
+            import Quartz
+
+            _, up, _, btn = self._button_kinds(button)
+            ev = Quartz.CGEventCreateMouseEvent(None, up, self._pos, btn)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+            return True
+        except Exception:
+            return False
+
+    def dragged_to(self, x: float, y: float, button: str = "left") -> bool:
+        """Move to (x, y) with the button held (drag step)."""
+        gx, gy = self.map_to_global(x, y)
+        self._pos = (gx, gy)
+        if button not in ("left", "right"):
+            button = "left"
+        try:
+            import Quartz
+
+            _, _, dragged, btn = self._button_kinds(button)
+            Quartz.CGWarpMouseCursorPosition((gx, gy))
+            ev = Quartz.CGEventCreateMouseEvent(None, dragged, (gx, gy), btn)
+            Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
+            return True
+        except Exception:
+            return False
+
+    def double_click(self, button: str = "left") -> bool:
+        """Post two click pairs at the current position."""
+        return bool(self.click(button)) and bool(self.click(button))
+
+    def scroll(self, dy: float, dx: float = 0.0) -> bool:
+        """Post a scroll-wheel event (positive dy = scroll up).
+
+        Supports 2-axis scroll; falls back to the 1-axis call when the
+        installed Quartz only accepts a single wheel argument.
+        """
+        try:
+            import Quartz
+
+            try:
+                ev = Quartz.CGEventCreateScrollWheelEvent(
+                    None, Quartz.kCGScrollEventUnitLine, 2, int(dy), int(dx)
+                )
+            except Exception:
+                ev = Quartz.CGEventCreateScrollWheelEvent(
+                    None, Quartz.kCGScrollEventUnitLine, 1, int(dy)
+                )
             Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
             return True
         except Exception:

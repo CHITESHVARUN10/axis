@@ -154,11 +154,12 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--cursor-mode",
-        choices=["auto", "avatar", "real"],
+        choices=["auto", "avatar", "real", "control"],
         default=None,
         help="cursor mode: auto (best available), avatar (on-screen arrow, "
         "click-through), real (moves the actual macOS cursor; needs "
-        "Accessibility permission)",
+        "Accessibility permission), control (gesture-gated real cursor: "
+        "move + click + drag + scroll; needs Accessibility permission)",
     )
     parser.add_argument(
         "--clicks",
@@ -166,7 +167,8 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         action="store_true",
         default=False,
         help="enable pinch-to-click (posts real clicks at the cursor; "
-        "requires real cursor mode + Accessibility permission)",
+        "requires real cursor mode + Accessibility permission; "
+        "control mode always clicks)",
     )
     parser.add_argument(
         "--timeout",
@@ -181,6 +183,79 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         "(default: none)",
     )
     return parser.parse_args(argv)
+
+
+def _palm_center(primary) -> tuple:
+    """Normalized palm center (wrist + 4 MCPs) for the relative pointer."""
+    lm = primary.landmarks
+    return (
+        float(np.mean(lm[[0, 5, 9, 13, 17], :2], axis=0)[0]),
+        float(np.mean(lm[[0, 5, 9, 13, 17], :2], axis=0)[1]),
+    )
+
+
+def _control_frame(control, pointer, real_cursor, overlay, rec, primary,
+                   cursor_config):
+    """Run one control-mode frame: gate movement, route OS actions.
+
+    Returns the cursor position for the debug-view mirror dot.
+    """
+    hand_present = primary is not None
+    decision = control.update(
+        rec.kind if hand_present else "none",
+        hand_present,
+        scroll_direction=getattr(rec, "scroll_direction", ""),
+        cursor_pos=(pointer.pos_x, pointer.pos_y),
+    )
+    if overlay is not None:
+        overlay.set_state(decision.state)
+
+    if decision.action == "scroll":
+        real_cursor.scroll(decision.scroll_dy, decision.scroll_dx)
+        pointer.reset()
+        if overlay is not None:
+            overlay.update(pointer.pos_x, pointer.pos_y, True)
+        return (pointer.pos_x, pointer.pos_y)
+    if decision.action == "drag_end":
+        real_cursor.mouse_up()
+        pointer.reset()
+        return (pointer.pos_x, pointer.pos_y)
+    if decision.state == "scrolling":
+        # Scroll grace frames (hand settling between strokes): hold the
+        # cursor still AND re-anchor the pointer to the live OS position,
+        # so exiting scroll never jumps from a stale position.
+        try:
+            pointer.sync_to(*real_cursor.get_position())
+        except Exception:
+            pointer.reset()
+        if overlay is not None:
+            overlay.update(pointer.pos_x, pointer.pos_y, True)
+        return (pointer.pos_x, pointer.pos_y)
+    if decision.state in ("tracking", "dragging") and hand_present:
+        c = _palm_center(primary)
+        cursor_pos = pointer.update(c)
+        if cursor_pos is None:
+            return (pointer.pos_x, pointer.pos_y)
+        if decision.action == "drag_start":
+            real_cursor.move_to(*cursor_pos)
+            real_cursor.mouse_down()
+        elif decision.state == "dragging":
+            real_cursor.dragged_to(*cursor_pos)
+        else:
+            real_cursor.move_to(*cursor_pos)
+        if overlay is not None:
+            overlay.update(cursor_pos[0], cursor_pos[1], True)
+        if decision.action == "click":
+            real_cursor.click("left")
+            pointer.freeze(cursor_config.control.click_freeze_ms)
+        elif decision.action == "double_click":
+            real_cursor.double_click("left")
+            pointer.freeze(cursor_config.control.click_freeze_ms)
+        return cursor_pos
+    pointer.reset()
+    if overlay is not None:
+        overlay.hide()
+    return (pointer.pos_x, pointer.pos_y)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -250,6 +325,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     # --- virtual cursor -------------------------------------------------
     from axis.cursor import (
+        ControlState,
         RelativePointer,
         VirtualCursor,
         load_cursor_config,
@@ -262,20 +338,41 @@ def main(argv: Optional[list[str]] = None) -> int:
     requested_mode = args.cursor_mode or cursor_config.mode
     trusted = ensure_accessibility()
     cursor_mode = resolve_cursor_mode(requested_mode, trusted)
-    if requested_mode in ("real", "auto") and not trusted:
+    if requested_mode in ("real", "auto", "control") and not trusted:
         print_accessibility_guidance()
-    pointer = RelativePointer(cursor_config)
+    pointer = RelativePointer(cursor_config, mirror_x=cursor_config.mirror_x)
     try:
         from AppKit import NSScreen
 
-        s = NSScreen.mainScreen().frame()
-        pointer.set_screen(s.size.width, s.size.height)
+        screens = NSScreen.screens()
+        xs = [float(s.frame().origin.x) for s in screens]
+        ys = [float(s.frame().origin.y) for s in screens]
+        ws = [float(s.frame().size.width) for s in screens]
+        hs = [float(s.frame().size.height) for s in screens]
+        pointer.set_screen(max(x + w for x, w in zip(xs, ws)),
+                           max(y + h for y, h in zip(ys, hs)))
     except Exception:
-        pass  # keep pointer defaults
+        try:
+            from AppKit import NSScreen
+
+            s = NSScreen.mainScreen().frame()
+            pointer.set_screen(s.size.width, s.size.height)
+        except Exception:
+            pass  # keep pointer defaults
     overlay = VirtualCursor(cursor_config)
     overlay_on = args.cursor and overlay.start()
     real_cursor: Optional[RealCursorController] = None
-    if args.cursor and cursor_mode == "real":
+    control: Optional[ControlState] = None
+    if args.cursor and cursor_mode == "control":
+        real_cursor = RealCursorController()
+        try:
+            pointer.sync_to(*real_cursor.get_position())
+        except Exception:
+            pass
+        control = ControlState(cursor_config.control)
+        overlay.set_style("ring")  # marker over the real cursor
+        print("Cursor mode: control (hand drives the real macOS cursor)")
+    elif args.cursor and cursor_mode == "real":
         real_cursor = RealCursorController()
         overlay.set_style("ring")  # marker over the real cursor
         print("Cursor mode: real (moves the actual macOS cursor)")
@@ -322,26 +419,37 @@ def main(argv: Optional[list[str]] = None) -> int:
             cursor_pos = None
             if overlay_on or real_cursor is not None:
                 if session_active and primary is not None:
-                    # Palm center (normalized) → relative pointer.
-                    lm = primary.landmarks
-                    c = (
-                        float(np.mean(lm[[0, 5, 9, 13, 17], :2], axis=0)[0]),
-                        float(np.mean(lm[[0, 5, 9, 13, 17], :2], axis=0)[1]),
-                    )
-                    cursor_pos = pointer.update(c)
-                    if real_cursor is not None:
-                        real_cursor.move_to(*cursor_pos)
-                    if overlay_on:
-                        overlay.update(cursor_pos[0], cursor_pos[1], True)
+                    if control is not None and real_cursor is not None:
+                        cursor_pos = _control_frame(
+                            control, pointer, real_cursor, overlay,
+                            rec, primary, cursor_config,
+                        )
+                    else:
+                        # Palm center (normalized) → relative pointer.
+                        lm = primary.landmarks
+                        c = (
+                            float(np.mean(lm[[0, 5, 9, 13, 17], :2], axis=0)[0]),
+                            float(np.mean(lm[[0, 5, 9, 13, 17], :2], axis=0)[1]),
+                        )
+                        cursor_pos = pointer.update(c)
+                        if real_cursor is not None:
+                            real_cursor.move_to(*cursor_pos)
+                        if overlay_on:
+                            overlay.update(cursor_pos[0], cursor_pos[1], True)
                 else:
                     pointer.reset()
+                    if control is not None:
+                        control.update("none", False)
+                        if overlay_on:
+                            overlay.set_state("clutched")
                     if overlay_on:
                         overlay.hide()
             if overlay_on:
                 overlay.pump()
 
-            # Optional pinch-to-click (real mode only, edge-triggered).
-            if args.clicks and real_cursor is not None:
+            # Optional pinch-to-click (real mode only, edge-triggered;
+            # control mode handles its own debounced clicks above).
+            if args.clicks and real_cursor is not None and control is None:
                 is_pinch = rec.kind == "pinch"
                 if is_pinch and not was_pinch:
                     real_cursor.click("left")
@@ -470,6 +578,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         if overlay_on:
             overlay.stop()
         if real_cursor is not None:
+            if control is not None and control.button_held:
+                try:
+                    real_cursor.mouse_up()
+                except Exception:
+                    pass
             real_cursor.stop()
         if hotkey is not None:
             hotkey.stop()

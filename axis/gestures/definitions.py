@@ -179,6 +179,13 @@ FINGER_MIDDLE = 4
 FINGER_RING = 8
 FINGER_PINKY = 16
 
+# Move pose = full open palm (all four fingers + thumb out). Scroll pose =
+# index + middle extended with pinky folded and thumb tucked (a "two-finger"
+# hand). Splitting by shape means translating an open palm moves the cursor
+# and NEVER scrolls — scroll needs the distinct two-finger pose.
+MOVE_FINGERS = FINGER_THUMB | FINGER_INDEX | FINGER_MIDDLE | FINGER_RING | FINGER_PINKY
+SCROLL_FINGERS = FINGER_INDEX | FINGER_MIDDLE
+
 
 def finger_pattern(landmarks: np.ndarray) -> int:
     """Classify which fingers are extended, as a bitmask.
@@ -217,6 +224,33 @@ def finger_pattern_name(pattern: int) -> str:
     if pattern & FINGER_PINKY:
         names.append("pinky")
     return "+".join(names) if names else "fist"
+
+
+def is_move_shape(landmarks: np.ndarray) -> bool:
+    """True for the MOVE pose: full open palm, all fingers extended.
+
+    Strict: ring + pinky must be out too, so a two-finger scroll hand
+    never counts as move (and vice versa).
+    """
+    pattern = finger_pattern(landmarks)
+    return (pattern & MOVE_FINGERS) == MOVE_FINGERS
+
+
+def is_scroll_shape(landmarks: np.ndarray) -> bool:
+    """True for the SCROLL pose: index + middle out, thumb NOT extended.
+
+    The two-finger hand (like a trackpad two-finger scroll): index and
+    middle extended, pinky folded, thumb tucked. Ring is ignored — the
+    ring MCP sits so close to the palm center that its extended/folded
+    reading is noisy, and real two-finger poses vary on ring. A full open
+    palm (thumb OUT) is NOT a scroll shape — it moves the cursor instead.
+    """
+    pattern = finger_pattern(landmarks)
+    if (pattern & SCROLL_FINGERS) != SCROLL_FINGERS:
+        return False
+    if pattern & (FINGER_PINKY | FINGER_THUMB):
+        return False
+    return True
 
 
 @dataclass

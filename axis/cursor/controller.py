@@ -4,6 +4,11 @@ Trackpad-style: only *relative* hand motion moves the cursor. The hand
 position in the camera frame is never mapped absolutely to the screen —
 the user re-centers the hand like lifting a finger off a trackpad.
 
+Mirror note: the debug camera feed is NOT flipped (OpenCV shows the raw
+sensor image), so moving your hand to YOUR right moves the image to the
+right as well — no X inversion needed. If the feed is ever mirrored for a
+"selfie view", set `mirror_x=True` so cursor direction still feels natural.
+
 Pipeline per frame (with a tracked hand):
 
     delta    = c_t - c_prev                    (normalized camera coords)
@@ -21,6 +26,7 @@ frame after re-detection produces zero delta (no cursor jump).
 from __future__ import annotations
 
 import math
+import time
 from typing import Optional, Tuple
 
 from axis.cursor.config import CursorConfig
@@ -30,8 +36,10 @@ from axis.cursor.filter import OneEuroFilter, deadzone, gain_curve
 class RelativePointer:
     """Trackpad-style relative cursor integrator."""
 
-    def __init__(self, config: Optional[CursorConfig] = None):
+    def __init__(self, config: Optional[CursorConfig] = None,
+                 mirror_x: bool = False):
         self.config = config or CursorConfig()
+        self.mirror_x = mirror_x
         self.screen_w: float = 1440.0
         self.screen_h: float = 900.0
         self.pos_x: float = self.screen_w / 2.0
@@ -39,6 +47,8 @@ class RelativePointer:
         self._c_prev: Optional[Tuple[float, float]] = None
         self._fx = OneEuroFilter(self.config.min_cutoff, self.config.beta, self.config.d_cutoff)
         self._fy = OneEuroFilter(self.config.min_cutoff, self.config.beta, self.config.d_cutoff)
+        self._gain_scale: float = 1.0
+        self._frozen_until: float = 0.0
 
     def set_screen(self, w: float, h: float) -> None:
         """Set the screen size in points; clamp the current position."""
@@ -46,12 +56,34 @@ class RelativePointer:
         self.pos_x = min(max(self.pos_x, 0.0), self.screen_w)
         self.pos_y = min(max(self.pos_y, 0.0), self.screen_h)
 
+    def sync_to(self, x: float, y: float) -> None:
+        """Re-anchor to a known OS cursor position (no jump on engage).
+
+        Call when (re-)entering Tracking with the live position from
+        `RealCursorController.get_position()`. Resets motion history so
+        the first frame after sync produces zero delta.
+        """
+        self.pos_x = min(max(float(x), 0.0), self.screen_w)
+        self.pos_y = min(max(float(y), 0.0), self.screen_h)
+        self.reset()
+
+    def set_gain_scale(self, scale: float) -> None:
+        """Momentary gain multiplier (precision mode: ~0.25)."""
+        self._gain_scale = max(float(scale), 0.0)
+
+    def freeze(self, ms: float, now: Optional[float] = None) -> None:
+        """Suppress cursor motion for `ms` (click-slip guard)."""
+        base = now if now is not None else time.monotonic()
+        self._frozen_until = max(self._frozen_until, base + ms / 1000.0)
+        self.reset()
+
     def reset(self) -> None:
         self._c_prev = None
         self._fx.reset()
         self._fy.reset()
 
-    def update(self, c: Optional[Tuple[float, float]], dt: float = 1.0 / 30.0) -> Optional[Tuple[float, float]]:
+    def update(self, c: Optional[Tuple[float, float]], dt: float = 1.0 / 30.0,
+               now: Optional[float] = None) -> Optional[Tuple[float, float]]:
         """Feed one frame's palm center (normalized [0,1] camera coords).
 
         Returns the new cursor position in screen points (top-left origin),
@@ -60,6 +92,10 @@ class RelativePointer:
         if c is None:
             self.reset()
             return None
+        t = now if now is not None else time.monotonic()
+        if t < self._frozen_until:
+            self._c_prev = c
+            return self.pos_x, self.pos_y
         if self._c_prev is None:
             self._c_prev = c
             return self.pos_x, self.pos_y
@@ -67,6 +103,8 @@ class RelativePointer:
         dx = c[0] - self._c_prev[0]
         dy = c[1] - self._c_prev[1]
         self._c_prev = c
+        if self.mirror_x:
+            dx = -dx
 
         # A truly stationary hand (delta below deadzone) must not move the
         # cursor — the One Euro filter's internal lag would otherwise keep
@@ -82,7 +120,7 @@ class RelativePointer:
 
         dx, dy = gain_curve(
             dx, dy,
-            base=self.config.base_gain,
+            base=self.config.base_gain * self._gain_scale,
             accel=self.config.accel,
             accel_power=self.config.accel_power,
         )
