@@ -167,8 +167,28 @@ def test_scroll_maps_direction_to_wheel():
     assert d.state == "scrolling"
     assert d.action == "scroll"
     assert d.scroll_dy < 0
-    d = st.update("scroll", True, scroll_direction="up")
-    assert d.scroll_dy > 0
+    # Continuous scroll: an empty-direction frame mid-stroke keeps
+    # scrolling the latched direction (no flip, no stall).
+    d = st.update("scroll", True, scroll_direction="")
+    assert d.state == "scrolling"
+    assert d.action == "scroll"
+    assert d.scroll_dy < 0
+
+
+def test_scroll_without_direction_posts_nothing():
+    st, _ = _state()
+    d = st.update("scroll", True, scroll_direction="")
+    assert d.state == "scrolling"
+    assert d.action == "none"
+
+
+def test_scroll_velocity_scales_wheel():
+    st, _ = _state()
+    slow = st.update("scroll", True, scroll_direction="down", palm_delta_px=0.0)
+    st2, _ = _state()
+    fast = st2.update("scroll", True, scroll_direction="down", palm_delta_px=80.0)
+    assert fast.action == "scroll" and slow.action == "scroll"
+    assert abs(fast.scroll_dy) > abs(slow.scroll_dy)
 
 
 def test_scroll_grace_holds_cursor_between_strokes():
@@ -183,11 +203,13 @@ def test_scroll_grace_holds_cursor_between_strokes():
     assert (d.state, d.action) == ("tracking", "move")
 
 
-def test_scroll_without_direction_posts_nothing():
-    st, _ = _state()
-    d = st.update("scroll", True, scroll_direction="")
-    assert d.state == "scrolling"
-    assert d.action == "none"
+def test_pointer_mirror_default_on():
+    """Selfie view is the default: mirror_x on unless opted out."""
+    assert CursorConfig().mirror_x is True
+    assert CursorConfig.from_dict({}).mirror_x is True
+    assert CursorConfig.from_dict({"mirror_x": False}).mirror_x is False
+    p = RelativePointer(CursorConfig())
+    assert p.mirror_x is True
 
 
 def test_pointer_mirror_x_flips_horizontal():
@@ -196,6 +218,25 @@ def test_pointer_mirror_x_flips_horizontal():
     x0 = p.pos_x
     p.update((0.55, 0.5))
     assert p.pos_x < x0
+    q = RelativePointer(CursorConfig(), mirror_x=False)
+    q.update((0.5, 0.5))
+    qx0 = q.pos_x
+    q.update((0.55, 0.5))
+    assert q.pos_x >= qx0 - q.config.deadzone_radius_px
+
+
+def test_cursor_reaches_screen_edge_for_dock():
+    """Clamp margin 1px: repeated same-direction strokes reach the edge."""
+    p = RelativePointer(CursorConfig(), mirror_x=False)
+    p.set_screen(200, 200)
+    p.sync_to(100.0, 100.0)
+    for _ in range(12):
+        # One trackpad-style stroke: engage, swipe, lift (reset).
+        p.update((0.3, 0.3))
+        p.update((0.55, 0.55))
+        p.reset()
+    assert p.pos_x >= 200.0 - 1.0 - 1e-6
+    assert p.pos_y >= 200.0 - 1.0 - 1e-6
 
 
 # --- pointer additions --------------------------------------------------
@@ -209,14 +250,15 @@ def test_pointer_sync_to_reanchors_without_jump():
 
 
 def test_pointer_gain_scale_slows_precision():
-    p1 = RelativePointer(CursorConfig(base_gain=1.5))
-    p2 = RelativePointer(CursorConfig(base_gain=1.5))
+    p1 = RelativePointer(CursorConfig(base_gain=1.5), mirror_x=False)
+    p2 = RelativePointer(CursorConfig(base_gain=1.5), mirror_x=False)
     p2.set_gain_scale(0.25)
     for p in (p1, p2):
         p.set_screen(1000, 1000)
+        p.sync_to(500.0, 500.0)
         p.update((0.5, 0.5))
-    o1 = p1.update((0.6, 0.5))
-    o2 = p2.update((0.6, 0.5))
+    o1 = p1.update((0.51, 0.5))
+    o2 = p2.update((0.51, 0.5))
     assert (o1[0] - 500.0) > (o2[0] - 500.0) > 0
 
 
@@ -293,15 +335,21 @@ def test_overlay_state_tints():
 class FakePointer:
     def __init__(self):
         self.pos_x, self.pos_y = 700.0, 500.0
+        self.screen_w, self.screen_h = 1440.0, 900.0
+        self._c_prev = None
         self.moves = 0
         self.resets = 0
 
-    def update(self, c):
+    def update(self, c, dt=1.0 / 30.0):
         self.moves += 1
         return (self.pos_x, self.pos_y)
 
     def reset(self):
         self.resets += 1
+
+    def sync_to(self, x, y):
+        self.pos_x, self.pos_y = x, y
+        self.reset()
 
     def freeze(self, ms):
         pass
@@ -310,6 +358,9 @@ class FakePointer:
 class FakeReal:
     def __init__(self):
         self.calls = []
+
+    def get_position(self):
+        return (700.0, 500.0)
 
     def move_to(self, x, y):
         self.calls.append("move")

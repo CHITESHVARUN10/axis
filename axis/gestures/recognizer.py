@@ -248,8 +248,10 @@ class GestureRecognizer:
         lm = hand.landmarks
         if not can_scroll(lm):
             self._scroll.pop(self._hand_key(hand), None)
-            self._scroll_direction = ""
-            return "none", 0.0, ""
+            # Keep the last latched direction visible briefly so the arrow
+            # doesn't vanish on a single mis-read frame; the differentiator
+            # still gates whether kind == scroll.
+            return "none", 0.0, self._scroll_direction
         key = self._hand_key(hand)
 
         size = palm_size(lm)
@@ -281,7 +283,8 @@ class GestureRecognizer:
             if st["still_frames"] >= STROKE_RESET_FRAMES:
                 st["latched"] = ""
                 st["buffer"].clear()
-            return "none", 0.0, ""
+                self._scroll_direction = ""
+            return "none", 0.0, st["latched"] or self._scroll_direction
 
         st["still_frames"] = 0
 

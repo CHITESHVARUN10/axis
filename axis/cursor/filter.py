@@ -64,11 +64,19 @@ def deadzone(dx: float, dy: float, radius: float) -> Tuple[float, float]:
 
 
 def gain_curve(
-    dx: float, dy: float, base: float = 1.5, accel: float = 0.0, accel_power: float = 1.0
+    dx: float, dy: float, base: float = 1.5, accel: float = 0.0, accel_power: float = 1.0,
+    ref_speed: float = 1.0,
 ) -> Tuple[float, float]:
-    """Scale a delta by a base gain with an optional acceleration curve."""
+    """Scale a delta by a base gain with an optional acceleration curve.
+
+    `speed` is measured in the same units as dx/dy (px/frame); `ref_speed`
+    is the speed at which the accel term equals `accel` (so a 10px/frame
+    hand drift with ref_speed=200 stays near base gain, while a 200px/frame
+    swipe gets the full boost). Normalizes the old raw-power curve, whose
+    accel term exploded on real pixel magnitudes.
+    """
     speed = math.hypot(dx, dy)
-    scale = base * (1.0 + accel * (speed ** accel_power))
+    scale = base * (1.0 + accel * ((speed / ref_speed) ** accel_power))
     return dx * scale, dy * scale
 
 

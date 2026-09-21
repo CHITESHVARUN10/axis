@@ -13,4 +13,5 @@ build/
 *.avi
 # Tooling config (keep out of version control)
 .commandcode/
+.devlens/
 .pytest_cache/

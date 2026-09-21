@@ -54,9 +54,22 @@ def test_one_euro_tracks_ramp():
 
 
 def test_gain_curve_linear_default():
-    dx, dy = gain_curve(2.0, 1.0, base=2.5, accel=0.0)
-    assert abs(dx - 5.0) < 1e-9
-    assert abs(dy - 2.5) < 1e-9
+    dx, dy = gain_curve(2.0, 1.0, base=1.3, accel=0.6, accel_power=1.4,
+                        ref_speed=150.0)
+    scale = 1.3 * (1.0 + 0.6 * ((math.hypot(2.0, 1.0) / 150.0) ** 1.4))
+    assert abs(dx - 2.0 * scale) < 1e-9
+    assert abs(dy - 1.0 * scale) < 1e-9
+
+
+def test_gain_curve_slow_precise_fast_covers():
+    """Trackpad feel: slow drifts stay near base, fast swipes accelerate."""
+    sx, _ = gain_curve(10.0, 0.0, base=1.3, accel=0.6, accel_power=1.4,
+                       ref_speed=150.0)
+    fx, _ = gain_curve(150.0, 0.0, base=1.3, accel=0.6, accel_power=1.4,
+                       ref_speed=150.0)
+    assert abs(sx / 10.0 - 1.3) < 0.15
+    assert abs(fx / 150.0 - 1.3 * 1.6) < 1e-9
+    assert fx / 150.0 > sx / 10.0
 
 
 # --- RelativePointer ---------------------------------------------------------
@@ -81,11 +94,21 @@ def test_first_hand_no_jump():
 
 
 def test_hand_right_moves_right():
-    p = _pointer()
+    p = _pointer(mirror_x=False)
     p.update((0.5, 0.5))
     out = p.update((0.55, 0.5))
     assert out[0] > p.pos_x - p.config.deadzone_radius_px
     assert out[1] == p.pos_y
+
+
+def test_hand_right_moves_right_in_selfie_default():
+    """Default mirror_x=True: image-right motion moves the cursor right."""
+    p = _pointer()
+    assert p.mirror_x is True
+    p.update((0.5, 0.5))
+    x0 = p.pos_x
+    p.update((0.45, 0.5))  # image-left = user's right in selfie view
+    assert p.pos_x > x0 - p.config.deadzone_radius_px
 
 
 def test_hand_stop_stops():
@@ -97,6 +120,40 @@ def test_hand_stop_stops():
     out = p.update((0.55, 0.5))
     assert abs(out[0] - pos_after_move[0]) < 1e-6
     assert abs(out[1] - pos_after_move[1]) < 1e-6
+
+
+def test_fast_swipe_capped_per_frame():
+    """No single frame teleports: fast swipes are capped, then continue."""
+    p = _pointer(mirror_x=False)
+    p.set_screen(2000, 2000)
+    p.sync_to(1000.0, 1000.0)
+    p.update((0.1, 0.5))
+    before = (p.pos_x, p.pos_y)
+    out = p.update((0.9, 0.5), dt=1.0 / 30.0)
+    step = abs(out[0] - before[0]) + abs(out[1] - before[1])
+    assert step <= p.config.max_step_px_per_frame + 1e-6
+
+
+def test_draw_landmarks_mirror_lines_up_with_hand():
+    """Selfie flip must move the skeleton to the side the user sees."""
+    from axis.ui.debug_view import draw_landmarks
+    from axis.landmarks import Hand, HandData
+
+    lm = np.zeros((21, 3), dtype=np.float32)
+    lm[:, 0] = 0.2  # hand on the left in raw coords
+    lm[:, 1] = 0.5
+    hd = HandData(
+        hands=[Hand(landmarks=lm, handedness="Right", score=0.9)],
+        frame_w=640, frame_h=480,
+    )
+    plain = np.zeros((480, 640, 3), dtype=np.uint8)
+    draw_landmarks(plain, hd, mirror_x=False)
+    mirrored = np.zeros((480, 640, 3), dtype=np.uint8)
+    draw_landmarks(mirrored, hd, mirror_x=True)
+    left_plain = plain[:, :320].sum()
+    right_mirrored = mirrored[:, 320:].sum()
+    assert left_plain > 0 and right_mirrored > 0
+    assert mirrored[:, :320].sum() == 0  # nothing drawn on the wrong side
 
 
 def test_clamp_to_screen():
@@ -125,7 +182,10 @@ def test_config_roundtrip():
     assert cfg.base_gain == 2.0
     assert cfg.deadzone_radius_px == 3.0
     assert cfg.radius_px == 12
-    assert cfg.accel == 0.0  # default
+    assert cfg.accel == 0.6  # trackpad default
+    assert cfg.mirror_x is True  # selfie default
+    assert cfg.accel_ref_px_per_frame == 150.0
+    assert cfg.max_step_px_per_frame == 60.0
 
 
 def test_load_cursor_config_defaults():
@@ -133,6 +193,8 @@ def test_load_cursor_config_defaults():
     import pathlib
 
     cfg = load_cursor_config(pathlib.Path("/nonexistent/cursor.json"))
-    assert cfg.base_gain == 2.5
+    assert cfg.base_gain == 1.3
     assert cfg.radius_px == 12
     assert cfg.mode == "auto"
+    assert cfg.mirror_x is True
+    assert cfg.screen_clamp_margin_px == 1

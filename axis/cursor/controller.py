@@ -4,10 +4,11 @@ Trackpad-style: only *relative* hand motion moves the cursor. The hand
 position in the camera frame is never mapped absolutely to the screen —
 the user re-centers the hand like lifting a finger off a trackpad.
 
-Mirror note: the debug camera feed is NOT flipped (OpenCV shows the raw
-sensor image), so moving your hand to YOUR right moves the image to the
-right as well — no X inversion needed. If the feed is ever mirrored for a
-"selfie view", set `mirror_x=True` so cursor direction still feels natural.
+Mirror: front cameras face the user, so the raw sensor image is flipped
+left-right versus the user's own left/right. The debug preview is shown
+as a selfie view (flipped horizontally) and `mirror_x=True` inverts the
+X delta so the cursor follows the hand the user SEES. `mirror_x` is the
+single source of truth — pass False only if the feed is truly unmirrored.
 
 Pipeline per frame (with a tracked hand):
 
@@ -37,7 +38,7 @@ class RelativePointer:
     """Trackpad-style relative cursor integrator."""
 
     def __init__(self, config: Optional[CursorConfig] = None,
-                 mirror_x: bool = False):
+                 mirror_x: bool = True):
         self.config = config or CursorConfig()
         self.mirror_x = mirror_x
         self.screen_w: float = 1440.0
@@ -123,7 +124,15 @@ class RelativePointer:
             base=self.config.base_gain * self._gain_scale,
             accel=self.config.accel,
             accel_power=self.config.accel_power,
+            ref_speed=self.config.accel_ref_px_per_frame,
         )
+        # Per-frame cap: the cursor can never jump further than this in one
+        # frame, no matter how fast the hand moves. Keeps fast swipes
+        # controllable (Dock reachable, never teleporting past it).
+        m = math.hypot(dx, dy)
+        cap = self.config.max_step_px_per_frame
+        if cap > 0 and m > cap:
+            dx, dy = dx * cap / m, dy * cap / m
         dx, dy = deadzone(dx, dy, self.config.deadzone_radius_px)
         dx = self._fx(dx, dt)
         dy = self._fy(dy, dt)

@@ -84,7 +84,11 @@ def test_can_scroll():
 
 
 def _two_finger():
-    """Two-finger scroll pose: index + middle out, pinky folded, thumb tucked."""
+    """Two-finger scroll pose: index + middle out, pinky folded.
+
+    Thumb state varies on real hands (ignored by is_scroll_shape); this
+    fixture tucks it for determinism.
+    """
     lm = _synthetic(spread=True)
     palm = lm[[0, 5, 9, 13, 17], :2].mean(axis=0)
     for i in (20, 4):
@@ -99,9 +103,18 @@ def test_can_scroll_two_finger():
 def test_scroll_shape_split():
     from axis.gestures import is_move_shape, is_scroll_shape
 
-    assert not is_scroll_shape(_synthetic(spread=True))
+    assert not is_scroll_shape(_synthetic(spread=True))  # pinky out = move
     assert is_scroll_shape(_two_finger())
     assert not is_move_shape(_two_finger())
+
+
+def test_scroll_shape_ignores_thumb():
+    """Thumb-out two-finger still scrolls (thumb reads noisy on real hands)."""
+    from axis.gestures import is_scroll_shape
+
+    lm = _two_finger()
+    lm[4] = (1.4, 0.3, 0.0)  # thumb flung out
+    assert is_scroll_shape(lm)
 
 
 def _recognizer(motions=None) -> GestureRecognizer:

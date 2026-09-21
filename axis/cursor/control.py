@@ -51,6 +51,7 @@ class ControlState:
         self._last_scroll_t: float = 0.0
         self._scroll_grace_until: float = 0.0
         self._last_decision_was_scroll: bool = False
+        self._scroll_dir: str = ""
 
     @property
     def button_held(self) -> bool:
@@ -100,23 +101,39 @@ class ControlState:
                 self._last_scroll_t = now
                 self._scroll_grace_until = now + 0.35
                 self._last_decision_was_scroll = False
+                self._scroll_dir = ""
                 return ControlDecision("scrolling", "drag_end")
             self.state = "scrolling"
             self._last_scroll_t = now
             self._scroll_grace_until = now + 0.35
             self._last_decision_was_scroll = True
-            step = cfg.scroll_px_per_line / 120.0
-            dx = dy = 0.0
-            if scroll_direction == "up":
-                dy = step
-            elif scroll_direction == "down":
-                dy = -step
-            elif scroll_direction == "left":
-                dx = -step
-            elif scroll_direction == "right":
-                dx = step
-            if not scroll_direction:
+            # Direction lock: once a stroke latches a direction, hold it
+            # until the hand stops (empty direction = stroke settling).
+            # A held two-finger stroke therefore keeps scrolling the same
+            # way every frame instead of flipping up/down on wobble. A new
+            # stroke after a full stop starts fresh (see _scroll_dir reset).
+            if not self._scroll_dir and scroll_direction:
+                self._scroll_dir = scroll_direction
+            direction = self._scroll_dir or scroll_direction
+            if not direction:
+                # Stroke settling (no latched direction yet): hold scrolling,
+                # emit nothing — no cursor move, no wheel tick, no flip.
                 return ControlDecision("scrolling", "none")
+            step = cfg.scroll_px_per_line / 120.0
+            # Velocity-proportional: a sustained stroke repeats the wheel
+            # tick each frame (continuous scroll); scale by palm travel so
+            # a fast stroke scrolls further than a slow one.
+            ticks = 1.0 + min(max(palm_delta_px, 0.0) / 40.0, 2.0)
+            step *= ticks
+            dx = dy = 0.0
+            if direction == "up":
+                dy = step
+            elif direction == "down":
+                dy = -step
+            elif direction == "left":
+                dx = -step
+            elif direction == "right":
+                dx = step
             return ControlDecision("scrolling", "scroll", dx, dy)
 
         if kind == "pinch":
@@ -167,6 +184,7 @@ class ControlState:
             self._last_decision_was_scroll = False
             return ControlDecision("scrolling", "none")
         self._last_decision_was_scroll = False
+        self._scroll_dir = ""
         if self.state in ("idle", "clutched"):
             self.state = "tracking"
             return ControlDecision("tracking", "move", 0.0, 0.0)

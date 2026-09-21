@@ -237,18 +237,19 @@ def is_move_shape(landmarks: np.ndarray) -> bool:
 
 
 def is_scroll_shape(landmarks: np.ndarray) -> bool:
-    """True for the SCROLL pose: index + middle out, thumb NOT extended.
+    """True for the SCROLL pose: index + middle out, pinky folded.
 
     The two-finger hand (like a trackpad two-finger scroll): index and
-    middle extended, pinky folded, thumb tucked. Ring is ignored — the
-    ring MCP sits so close to the palm center that its extended/folded
-    reading is noisy, and real two-finger poses vary on ring. A full open
-    palm (thumb OUT) is NOT a scroll shape — it moves the cursor instead.
+    middle extended, pinky folded. Ring is ignored (its MCP sits so close
+    to the palm center that the reading is noisy) and the thumb is ignored
+    too (its 0.75 threshold flips on real hands and vetoed most scrolls).
+    A full open palm (pinky OUT) is NOT a scroll shape — it moves the
+    cursor instead.
     """
     pattern = finger_pattern(landmarks)
     if (pattern & SCROLL_FINGERS) != SCROLL_FINGERS:
         return False
-    if pattern & (FINGER_PINKY | FINGER_THUMB):
+    if pattern & FINGER_PINKY:
         return False
     return True
 

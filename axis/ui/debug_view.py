@@ -46,6 +46,33 @@ LANDMARK_CONNECTIONS = [
 
 TRAIL_LEN = 24  # frames of palm-position history for the registration trail
 
+TUTORIAL_STEPS: list[tuple[str, str]] = [
+    (
+        "1/6 MOVE — show an OPEN PALM and drift it",
+        "Open palm (all fingers out). Drift slowly: cursor follows. Ring = green.",
+    ),
+    (
+        "2/6 CLICK — PINCH index + middle to thumb",
+        "Quick pinch = left-click. Pinch twice = double-click. Hand stays still.",
+    ),
+    (
+        "3/6 SCROLL — TWO FINGERS (index + middle, pinky folded) + move",
+        "Hold two fingers up and stroke. Up strokes scroll up, down strokes scroll down.",
+    ),
+    (
+        "4/6 DRAG — PINCH, HOLD 0.3s, then move",
+        "Pinch and hold until the ring turns blue, then drag. Release to drop.",
+    ),
+    (
+        "5/6 CLUTCH — make a FIST to freeze",
+        "Fist = freeze (yellow ring). Cursor holds while you re-center your hand.",
+    ),
+    (
+        "6/6 DOCK — open palm to the screen bottom",
+        "Move down slowly with an open palm to reach the Dock. Press T to exit.",
+    ),
+]
+
 
 def recognition_color(rec: Recognition) -> tuple[int, int, int]:
     if rec.kind in ("pinch", "scroll"):
@@ -57,11 +84,20 @@ def recognition_color(rec: Recognition) -> tuple[int, int, int]:
     return YELLOW
 
 
-def draw_landmarks(frame: np.ndarray, hand_data: HandData) -> None:
-    """Draw landmarks + connections + hand bbox for every detected hand."""
+def draw_landmarks(
+    frame: np.ndarray, hand_data: HandData, mirror_x: bool = False
+) -> None:
+    """Draw landmarks + connections + hand bbox for every detected hand.
+
+    When the preview is shown as a selfie view (mirrored), the landmark
+    x-coords must be mirrored too — otherwise the skeleton draws on the
+    opposite side from the hand the user sees.
+    """
     h, w = frame.shape[:2]
     for hand in hand_data.hands:
-        pts = hand.landmarks
+        pts = hand.landmarks.copy()
+        if mirror_x:
+            pts[:, 0] = 1.0 - pts[:, 0]
         for a, b in LANDMARK_CONNECTIONS:
             p1 = (int(pts[a][0] * w), int(pts[a][1] * h))
             p2 = (int(pts[b][0] * w), int(pts[b][1] * h))
@@ -241,6 +277,9 @@ class DebugView:
     toast: str = ""
     toast_until: float = 0.0
     record_count: int = 0  # completed 20s windows (for the 60s prompt)
+    tutorial_active: bool = False
+    tutorial_step: int = 0
+    mirror_preview: bool = True  # selfie view: flip the feed horizontally
     _continue_done: bool = True
     _buttons: list[NavButton] = field(default_factory=list)
     _last_frame_wh: tuple[int, int] = (640, 480)
@@ -278,9 +317,15 @@ class DebugView:
         # Hand-tracked indicator (right-aligned).
         track_label = "HAND: YES" if self._hand_tracked else "HAND: NO"
         track_w = 110
-        x = w - track_w - 52
+        x = w - track_w - 52 - 44
         self._buttons.append(
             NavButton(track_label, x, y, track_w, h, active=self._hand_tracked)
+        )
+        # HELP (?) — toggles the gesture tutorial.
+        help_w = 34
+        x = w - track_w - 52
+        self._buttons.append(
+            NavButton("?", x, y, help_w, h, active=self.tutorial_active)
         )
         # Close (X) — left of the HAND button, not overlapping.
         close_w = 34
@@ -352,6 +397,72 @@ class DebugView:
             cv2.LINE_AA,
         )
 
+    def _draw_tutorial(self, frame: np.ndarray) -> None:
+        """Draw the tutorial step card (center) when the tutorial is on."""
+        if not self.tutorial_active:
+            return
+        idx = min(self.tutorial_step, len(TUTORIAL_STEPS) - 1)
+        title, body = TUTORIAL_STEPS[idx]
+        h, w = frame.shape[:2]
+        lines = [title, body, "T = next step, HELP (?) = exit"]
+        box_w, box_h = 520, 30 + 24 * len(lines)
+        x0 = max((w - box_w) // 2, 6)
+        y0 = (h - box_h) // 2
+        cv2.rectangle(frame, (x0, y0), (x0 + box_w, y0 + box_h), (0, 0, 0), -1)
+        cv2.rectangle(frame, (x0, y0), (x0 + box_w, y0 + box_h), WHITE, 1)
+        for i, txt in enumerate(lines):
+            cv2.putText(
+                frame,
+                txt[:72],
+                (x0 + 12, y0 + 24 + i * 24),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.5,
+                GREEN if i == 0 else WHITE,
+                1,
+                cv2.LINE_AA,
+            )
+
+    def tutorial_advance(self) -> None:
+        """Step forward; completing the last step exits the tutorial."""
+        if self.tutorial_step + 1 >= len(TUTORIAL_STEPS):
+            self.tutorial_active = False
+            self.tutorial_step = 0
+            self._toast("Tutorial done")
+        else:
+            self.tutorial_step += 1
+            self._toast(f"Tutorial {self.tutorial_step + 1}/{len(TUTORIAL_STEPS)}")
+
+    def toggle_tutorial(self) -> None:
+        self.tutorial_active = not self.tutorial_active
+        self.tutorial_step = 0
+        self._toast(
+            "Tutorial ON — press T for next step"
+            if self.tutorial_active
+            else "Tutorial off"
+        )
+
+    def tutorial_observe(self, rec: Recognition, control_state: str = "") -> None:
+        """Auto-advance on success: the step completes when the live
+        recognition + control state show the gesture working."""
+        if not self.tutorial_active:
+            return
+        step = self.tutorial_step
+        done = False
+        if step == 0:
+            done = control_state == "tracking"
+        elif step == 1:
+            done = rec.kind == "pinch"
+        elif step == 2:
+            done = rec.kind == "scroll"
+        elif step == 3:
+            done = control_state == "dragging"
+        elif step == 4:
+            done = rec.kind == "fist" or control_state == "clutched"
+        elif step == 5:
+            done = control_state == "tracking"
+        if done:
+            self.tutorial_advance()
+
     def show(
         self,
         frame: np.ndarray,
@@ -373,12 +484,18 @@ class DebugView:
         """
         self._hand_tracked = hand is not None and len(hand.hands) > 0
         color = recognition_color(rec)
+        if self.mirror_preview:
+            # Selfie view: show the flipped pixels AND flip the landmark
+            # x-coords before drawing, so the skeleton/trail sit exactly
+            # on the hand the user sees (not mirrored to the wrong side).
+            frame = cv2.flip(frame, 1)
         if hand is not None:
-            draw_landmarks(frame, hand)
+            draw_landmarks(frame, hand, mirror_x=self.mirror_preview)
             if rec.kind == "unknown" and rec.registration_candidate is not None:
                 primary = hand.primary
                 if primary is not None:
-                    p = primary.landmarks[9]
+                    px = 1.0 - primary.landmarks[9][0] if self.mirror_preview else primary.landmarks[9][0]
+                    p = (px, primary.landmarks[9][1])
                     self._trail.append((int(p[0] * frame.shape[1]), int(p[1] * frame.shape[0])))
                     if len(self._trail) > TRAIL_LEN:
                         self._trail.pop(0)
@@ -422,6 +539,7 @@ class DebugView:
             cv2.circle(frame, (mx, my), 3, GREEN, -1)
         self._draw_navbar(frame)
         self._draw_toast(frame)
+        self._draw_tutorial(frame)
         cv2.imshow(self.window_name, frame)
 
     def map_coords(self, x: int, y: int) -> tuple[int, int]:
@@ -448,7 +566,7 @@ class DebugView:
         """Route a navbar click; returns a command or None.
 
         Commands: "open_dropdown", "select_gesture:<name>", "toggle_train",
-        "close". Dropdown item clicks are handled first.
+        "toggle_tutorial", "close". Dropdown item clicks are handled first.
         """
         # If the dropdown is open, check item clicks first.
         if self.dropdown_open and self._buttons:
@@ -484,6 +602,9 @@ class DebugView:
                 return "toggle_train"
             if b.label == "X":
                 return "close"
+            if b.label == "?":
+                self.toggle_tutorial()
+                return "toggle_tutorial"
         return None
 
     def cycle_gesture(self, delta: int = 1) -> str:

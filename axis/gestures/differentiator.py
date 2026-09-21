@@ -29,7 +29,6 @@ from axis.gestures.definitions import (
     FINGER_INDEX,
     FINGER_MIDDLE,
     FINGER_PINKY,
-    FINGER_THUMB,
     MotionRegistry,
     MotionTemplate,
     finger_pattern,
@@ -45,8 +44,9 @@ PALM_CENTER_IDX = [0, 5, 9, 13, 17]
 THUMB_TIP = 4
 INDEX_TIP = 8
 
-# Scroll requires the two-finger pose: index + middle extended, ring +
-# pinky folded. A full open palm NEVER scrolls — it moves the cursor.
+# Scroll requires the two-finger pose: index + middle extended, pinky
+# folded (thumb and ring ignored — both read noisy on real hands).
+# A full open palm (pinky OUT) NEVER scrolls — it moves the cursor.
 SCROLL_MIN_FINGERS = FINGER_INDEX | FINGER_MIDDLE
 
 
@@ -197,14 +197,14 @@ class MotionDifferentiator:
         if f["L"] < self.config.path_min:
             return self._hysteresis("static", "", 0.0) + ("",)
 
-        # 3) Scroll branch: two-finger palm translating. The shape gate is
-        #    strict (index + middle out, pinky + thumb folded) so a moving
-        #    open palm NEVER scrolls — it moves the cursor instead.
+        # 3) Scroll branch: two-finger palm translating. The shape gate
+        #    (index + middle out, pinky folded) keeps a moving open palm
+        #    on the cursor — it NEVER scrolls.
         w = self._window
         scroll_shape = False
         if w.masks:
             scroll_shape = (w.masks[-1] & SCROLL_MIN_FINGERS) == SCROLL_MIN_FINGERS and not (
-                w.masks[-1] & (FINGER_PINKY | FINGER_THUMB)
+                w.masks[-1] & FINGER_PINKY
             )
         if scroll_shape and np.hypot(*f["D"]) >= self.config.scroll_disp_min:
             kind, direction, score, label = self._scroll_classify(f, motions)
@@ -280,12 +280,15 @@ class MotionDifferentiator:
     def _hysteresis(
         self, kind: str, direction: str, score: float
     ) -> Tuple[str, str, float]:
-        """Prevent scroll↔zoom flapping.
+        """Prevent scroll↔zoom flapping and scroll direction flips.
 
-        Only dynamic-class flips are protected (requires the new class to
-        beat the committed one by `hysteresis`). Entering/leaving a dynamic
-        gesture (via "none"/"static") is never blocked, so a held gesture
-        clears as soon as the motion stops.
+        Dynamic-class flips (scroll↔zoom) need the new class to beat the
+        committed one by `hysteresis`. A committed scroll DIRECTION is
+        additionally locked: mid-stroke wobble reporting the opposite axis
+        (e.g. up during a down stroke) holds the latched direction until
+        the motion stops (via "none"/"static"). Entering/leaving a dynamic
+        gesture is never blocked, so a held gesture still clears as soon
+        as the motion stops.
         """
         last_kind, last_dir, last_score = self._last_committed
         if (
@@ -293,6 +296,14 @@ class MotionDifferentiator:
             and last_kind in ("scroll", "zoom")
             and kind != last_kind
             and score < last_score + self.config.hysteresis
+        ):
+            return last_kind, last_dir, last_score
+        if (
+            kind == "scroll"
+            and last_kind == "scroll"
+            and direction
+            and last_dir
+            and direction != last_dir
         ):
             return last_kind, last_dir, last_score
         self._last_committed = (kind, direction, score)

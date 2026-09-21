@@ -47,16 +47,18 @@ class CursorConfig:
     """Tunable parameters for the virtual cursor."""
 
     mode: str = "auto"           # auto | avatar | real | control
-    base_gain: float = 2.5
-    accel: float = 0.0
-    accel_power: float = 1.0
-    deadzone_radius_px: float = 2.0
-    min_cutoff: float = 1.2
+    base_gain: float = 1.3
+    accel: float = 0.6
+    accel_power: float = 1.4
+    accel_ref_px_per_frame: float = 150.0
+    max_step_px_per_frame: float = 60.0
+    deadzone_radius_px: float = 3.0
+    min_cutoff: float = 0.8
     beta: float = 0.03
     d_cutoff: float = 1.0
     radius_px: int = 12
-    screen_clamp_margin_px: int = 4
-    mirror_x: bool = False
+    screen_clamp_margin_px: int = 1
+    mirror_x: bool = True
     control: ControlConfig = field(default_factory=ControlConfig)
 
     @classmethod
@@ -65,16 +67,18 @@ class CursorConfig:
         smoothing = d.get("smoothing", {})
         return cls(
             mode=str(d.get("mode", "auto")),
-            base_gain=float(gain.get("base", 2.5)),
-            accel=float(gain.get("accel", 0.0)),
-            accel_power=float(gain.get("accel_power", 1.0)),
-            deadzone_radius_px=float(d.get("deadzone_radius_px", 2.0)),
-            min_cutoff=float(smoothing.get("min_cutoff", 1.2)),
+            base_gain=float(gain.get("base", 1.3)),
+            accel=float(gain.get("accel", 0.6)),
+            accel_power=float(gain.get("accel_power", 1.4)),
+            accel_ref_px_per_frame=float(gain.get("ref_px_per_frame", 150.0)),
+            max_step_px_per_frame=float(d.get("max_step_px_per_frame", 60.0)),
+            deadzone_radius_px=float(d.get("deadzone_radius_px", 3.0)),
+            min_cutoff=float(smoothing.get("min_cutoff", 0.8)),
             beta=float(smoothing.get("beta", 0.03)),
             d_cutoff=float(smoothing.get("d_cutoff", 1.0)),
             radius_px=int(d.get("radius_px", 12)),
-            screen_clamp_margin_px=int(d.get("screen_clamp_margin_px", 4)),
-            mirror_x=bool(d.get("mirror_x", False)),
+            screen_clamp_margin_px=int(d.get("screen_clamp_margin_px", 1)),
+            mirror_x=bool(d.get("mirror_x", True)),
             control=ControlConfig.from_dict(d.get("control", {})),
         )
 

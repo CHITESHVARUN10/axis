@@ -17,6 +17,7 @@ import argparse
 import queue
 import sys
 import threading
+import time
 from typing import Optional
 
 import cv2
@@ -195,17 +196,26 @@ def _palm_center(primary) -> tuple:
 
 
 def _control_frame(control, pointer, real_cursor, overlay, rec, primary,
-                   cursor_config):
+                   cursor_config, dt: float = 1.0 / 30.0):
     """Run one control-mode frame: gate movement, route OS actions.
 
     Returns the cursor position for the debug-view mirror dot.
     """
     hand_present = primary is not None
+    if hand_present:
+        c = _palm_center(primary)
+        palm_delta_px = 0.0
+        if pointer._c_prev is not None:
+            palm_delta_px = abs(c[0] - pointer._c_prev[0]) * pointer.screen_w + abs(
+                c[1] - pointer._c_prev[1]) * pointer.screen_h
+    else:
+        palm_delta_px = 0.0
     decision = control.update(
         rec.kind if hand_present else "none",
         hand_present,
         scroll_direction=getattr(rec, "scroll_direction", ""),
         cursor_pos=(pointer.pos_x, pointer.pos_y),
+        palm_delta_px=palm_delta_px,
     )
     if overlay is not None:
         overlay.set_state(decision.state)
@@ -233,7 +243,7 @@ def _control_frame(control, pointer, real_cursor, overlay, rec, primary,
         return (pointer.pos_x, pointer.pos_y)
     if decision.state in ("tracking", "dragging") and hand_present:
         c = _palm_center(primary)
-        cursor_pos = pointer.update(c)
+        cursor_pos = pointer.update(c, dt=dt)
         if cursor_pos is None:
             return (pointer.pos_x, pointer.pos_y)
         if decision.action == "drag_start":
@@ -401,10 +411,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     print(f"Hand tracking: {'on' if args.debug else 'headless'}")
 
     try:
+        _last_frame_t = time.monotonic()
         while True:
             frame = camera.read()
             if frame is None:
                 continue
+
+            # Measured frame dt (clamped): the smoothing filter and speed
+            # curve consume real time, so a slow frame never becomes a jump.
+            now_t = time.monotonic()
+            dt = min(max(now_t - _last_frame_t, 1e-3), 0.1)
+            _last_frame_t = now_t
 
             hand_data = extractor.process(frame)
             hands = hand_data.hands if hand_data is not None else []
@@ -422,7 +439,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     if control is not None and real_cursor is not None:
                         cursor_pos = _control_frame(
                             control, pointer, real_cursor, overlay,
-                            rec, primary, cursor_config,
+                            rec, primary, cursor_config, dt=dt,
                         )
                     else:
                         # Palm center (normalized) → relative pointer.
@@ -431,7 +448,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                             float(np.mean(lm[[0, 5, 9, 13, 17], :2], axis=0)[0]),
                             float(np.mean(lm[[0, 5, 9, 13, 17], :2], axis=0)[1]),
                         )
-                        cursor_pos = pointer.update(c)
+                        cursor_pos = pointer.update(c, dt=dt)
                         if real_cursor is not None:
                             real_cursor.move_to(*cursor_pos)
                         if overlay_on:
@@ -472,6 +489,8 @@ def main(argv: Optional[list[str]] = None) -> int:
                 cmd = view.handle_click(cx, cy) if view is not None else None
                 if cmd == "close":
                     raise KeyboardInterrupt
+                if cmd == "toggle_tutorial":
+                    pass  # view.toggle_tutorial() already ran in handle_click
                 if cmd == "toggle_train":
                     if view.training:
                         # TRAIN pressed: start a recording window NOW.
@@ -543,6 +562,9 @@ def main(argv: Optional[list[str]] = None) -> int:
 
             # --- render -------------------------------------------------
             if view is not None:
+                view.tutorial_observe(
+                    rec, control.state if control is not None else ""
+                )
                 view.show(
                     frame,
                     rec,
@@ -559,12 +581,18 @@ def main(argv: Optional[list[str]] = None) -> int:
                 # map perfectly on Retina displays):
                 #   [  previous gesture   ]  next gesture
                 #   1..7  jump to gesture by number (1 = Scroll Down ...)
+                #   t     tutorial next step / toggle
                 if key == ord("["):
                     view.cycle_gesture(-1)
                     train_gesture_name = view.selected_gesture
                 elif key == ord("]"):
                     view.cycle_gesture(1)
                     train_gesture_name = view.selected_gesture
+                elif key in (ord("t"), ord("T")):
+                    if view.tutorial_active:
+                        view.tutorial_advance()
+                    else:
+                        view.toggle_tutorial()
                 elif ord("1") <= key <= ord("9"):
                     idx = key - ord("1")
                     if view.select_gesture_by_index(idx) is not None:
