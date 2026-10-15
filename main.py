@@ -172,6 +172,15 @@ def parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
         "control mode always clicks)",
     )
     parser.add_argument(
+        "--hands",
+        type=int,
+        default=1,
+        choices=[1, 2],
+        help="maximum number of hands to track (1 is ~2x faster and the "
+        "gesture engine only uses the primary hand; use 2 for two-hand "
+        "gesture recording)",
+    )
+    parser.add_argument(
         "--timeout",
         type=float,
         default=120.0,
@@ -196,38 +205,48 @@ def _palm_center(primary) -> tuple:
 
 
 def _control_frame(control, pointer, real_cursor, overlay, rec, primary,
-                   cursor_config, dt: float = 1.0 / 30.0):
+                   cursor_config, dt: float = 1.0 / 30.0, view=None):
     """Run one control-mode frame: gate movement, route OS actions.
 
     Returns the cursor position for the debug-view mirror dot.
     """
     hand_present = primary is not None
-    if hand_present:
-        c = _palm_center(primary)
-        palm_delta_px = 0.0
-        if pointer._c_prev is not None:
-            palm_delta_px = abs(c[0] - pointer._c_prev[0]) * pointer.screen_w + abs(
-                c[1] - pointer._c_prev[1]) * pointer.screen_h
-    else:
-        palm_delta_px = 0.0
+    c = _palm_center(primary) if hand_present else None
     decision = control.update(
         rec.kind if hand_present else "none",
         hand_present,
         scroll_direction=getattr(rec, "scroll_direction", ""),
         cursor_pos=(pointer.pos_x, pointer.pos_y),
-        palm_delta_px=palm_delta_px,
+        palm_center=c,
     )
     if overlay is not None:
         overlay.set_state(decision.state)
 
+    # Pre-click precision: as the fingers approach a pinch, slow the cursor
+    # so the click lands where the user is aiming. Tracking only — during
+    # clutch/scroll the cursor is frozen anyway, so leave the gain alone.
+    if hand_present:
+        prox = getattr(rec, "pinch_proximity", 0.0)
+        if decision.state == "tracking" and prox >= 0.55:
+            pointer.set_gain_scale(cursor_config.control.precision_gain)
+        else:
+            pointer.set_gain_scale(1.0)
+
+    def _toast(msg: str) -> None:
+        if view is not None:
+            view._toast(msg)
+
     if decision.action == "scroll":
-        real_cursor.scroll(decision.scroll_dy, decision.scroll_dx)
-        pointer.reset()
+        if abs(decision.scroll_dy) + abs(decision.scroll_dx) > 0.05:
+            real_cursor.scroll(decision.scroll_dy, decision.scroll_dx)
+        # No pointer.reset here: ControlState tracks palm deltas itself, so
+        # reset would just lose the anchor (the old zero-velocity bug).
         if overlay is not None:
             overlay.update(pointer.pos_x, pointer.pos_y, True)
         return (pointer.pos_x, pointer.pos_y)
     if decision.action == "drag_end":
         real_cursor.mouse_up()
+        _toast("Drag end")
         pointer.reset()
         return (pointer.pos_x, pointer.pos_y)
     if decision.state == "scrolling":
@@ -242,13 +261,13 @@ def _control_frame(control, pointer, real_cursor, overlay, rec, primary,
             overlay.update(pointer.pos_x, pointer.pos_y, True)
         return (pointer.pos_x, pointer.pos_y)
     if decision.state in ("tracking", "dragging") and hand_present:
-        c = _palm_center(primary)
         cursor_pos = pointer.update(c, dt=dt)
         if cursor_pos is None:
             return (pointer.pos_x, pointer.pos_y)
         if decision.action == "drag_start":
             real_cursor.move_to(*cursor_pos)
             real_cursor.mouse_down()
+            _toast("Drag")
         elif decision.state == "dragging":
             real_cursor.dragged_to(*cursor_pos)
         else:
@@ -257,9 +276,14 @@ def _control_frame(control, pointer, real_cursor, overlay, rec, primary,
             overlay.update(cursor_pos[0], cursor_pos[1], True)
         if decision.action == "click":
             real_cursor.click("left")
-            pointer.freeze(cursor_config.control.click_freeze_ms)
+            _toast("Left click")
         elif decision.action == "double_click":
             real_cursor.double_click("left")
+            _toast("Double click")
+        elif decision.action == "right_click":
+            real_cursor.click("right")
+            _toast("Right click")
+        if decision.action in ("click", "double_click", "right_click"):
             pointer.freeze(cursor_config.control.click_freeze_ms)
         return cursor_pos
     pointer.reset()
@@ -306,7 +330,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     camera.open()
 
     # --- landmarks ------------------------------------------------------
-    extractor = HandLandmarker()
+    extractor = HandLandmarker(num_hands=max(int(args.hands), 1))
 
     # --- gesture engine -------------------------------------------------
     registry = build_registry()
@@ -412,10 +436,28 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     try:
         _last_frame_t = time.monotonic()
+        _none_streak = 0        # consecutive failed camera reads
+        _last_reopen_t = 0.0    # rate-limits camera reopen attempts
+        _process_warned = False
         while True:
             frame = camera.read()
             if frame is None:
+                # Stalled stream (iPhone locked/disconnected, device
+                # revocation): don't loop silently forever — reopen with
+                # a printed notice at most every 5s.
+                _none_streak += 1
+                now_t = time.monotonic()
+                if (_none_streak >= 30
+                        and now_t - _last_reopen_t >= 5.0):
+                    print("\n[Camera stream stalled — reopening...]")
+                    try:
+                        camera.reopen()
+                        print("[Camera reopened]")
+                    except CameraError as e:
+                        print(f"[Camera reopen failed: {e}]")
+                    _last_reopen_t = now_t
                 continue
+            _none_streak = 0
 
             # Measured frame dt (clamped): the smoothing filter and speed
             # curve consume real time, so a slow frame never becomes a jump.
@@ -423,10 +465,21 @@ def main(argv: Optional[list[str]] = None) -> int:
             dt = min(max(now_t - _last_frame_t, 1e-3), 0.1)
             _last_frame_t = now_t
 
-            hand_data = extractor.process(frame)
-            hands = hand_data.hands if hand_data is not None else []
+            try:
+                hand_data = extractor.process(frame)
+                rec = recognizer.recognize(
+                    hand_data.hands if hand_data is not None else []
+                )
+            except Exception as e:
+                # MediaPipe can raise (e.g. timestamp regressions); skip
+                # the frame instead of killing the run.
+                if not _process_warned:
+                    print(f"\n[Recognition error: {e!r} — continuing]")
+                    _process_warned = True
+                hand_data = None
+                rec = Recognition(kind="none", label="Tracking...", confidence=0.0)
             primary = hand_data.primary if hand_data is not None else None
-            rec = recognizer.recognize(hands)
+            hands = hand_data.hands if hand_data is not None else []
 
             # Session gate: note hand activity; the virtual cursor hides
             # when the session has been inactive for the timeout.
@@ -439,7 +492,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     if control is not None and real_cursor is not None:
                         cursor_pos = _control_frame(
                             control, pointer, real_cursor, overlay,
-                            rec, primary, cursor_config, dt=dt,
+                            rec, primary, cursor_config, dt=dt, view=view,
                         )
                     else:
                         # Palm center (normalized) → relative pointer.

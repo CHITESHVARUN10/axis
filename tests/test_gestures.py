@@ -117,6 +117,43 @@ def test_scroll_shape_ignores_thumb():
     assert is_scroll_shape(lm)
 
 
+def test_pinch_proximity_metric():
+    """0 past a spread hand, 1 at a pinch; rises as the hand closes."""
+    from axis.gestures import pinch_proximity
+
+    pinch = _synthetic(pinch=True)
+    spread = _synthetic(spread=True)
+    assert pinch_proximity(pinch) >= 1.0
+    assert pinch_proximity(pinch) > pinch_proximity(spread)
+    assert pinch_proximity(spread) < 0.55  # no slowdown while fully open
+
+    # Monotonic (non-strict) on an approach: index/middle tips slide
+    # toward the thumb, saturating at 1.0 before the pose is a pinch.
+    lm = _synthetic(spread=True)
+    values = []
+    for t in range(6):
+        f = t / 5.0
+        lm[8, 0] = 1.0 + (0.62 - 1.0) * f
+        lm[8, 1] = 0.35 * (1 - f)
+        lm[12, 0] = 1.05 + (0.64 - 1.05) * f
+        lm[12, 1] = -0.25 * (1 - f)
+        values.append(pinch_proximity(lm))
+    assert all(b >= a for a, b in zip(values, values[1:]))
+
+    fist = _synthetic(fist=True)
+    assert pinch_proximity(fist) >= 0.9  # a fist almost touches a pinch
+
+
+def test_recognition_carries_proximity():
+    """recognize() results expose pinch_proximity for the precision mode."""
+    rec = _recognizer()
+    hand = _hand(_synthetic(pinch=True))
+    out = _hold(rec, hand, frames=4)
+    assert out.pinch_proximity >= 1.0
+    out2 = _hold(rec, _hand(_synthetic(spread=True)), frames=4)
+    assert out2.pinch_proximity < 0.55
+
+
 def _recognizer(motions=None) -> GestureRecognizer:
     reg = GestureRegistry(definitions={})
     reg.add(make_pinch_definition())

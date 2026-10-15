@@ -1,9 +1,9 @@
 {
   "version": 1,
   "schema": "axis.differentiator.v1",
-  "window_frames": 12,
-  "path_min": 0.15,
-  "scroll_disp_min": 0.18,
+  "window_frames": 8,
+  "path_min": 0.10,
+  "scroll_disp_min": 0.12,
   "zoom_slope_min": 0.02,
   "margin": 0.10,
   "min_score": 0.35,

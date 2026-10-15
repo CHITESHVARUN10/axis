@@ -19,7 +19,7 @@ so user-specific scroll styles (2 fingers, angled hand, fast/slow) are
 recognized without retuning the built-in rules.
 
 Two-hand behavior:
-  - both hands are tracked (HandLandmarker num_hands=2)
+  - single-hand tracking by default (HandLandmarker num_hands=1; --hands 2 opts in)
   - static gestures classify the primary (highest-confidence) hand
   - scroll fires on any extended hand; a moving fist/pinch never scrolls
 """
@@ -60,13 +60,13 @@ SPREAD_MIN_RATIO = 0.50
 # Pinch: tip distance / palm size below this.
 PINCH_MAX_RATIO = 0.40
 # Scroll: vertical velocity of the palm, in palm-sizes per frame.
-SCROLL_MIN_SPEED = 0.03
+SCROLL_MIN_SPEED = 0.02
 # Stroke latch: minimum net displacement (in palm-sizes) before direction
 # is declared. Kills the up/down flapping on near-zero motion.
-STROKE_MIN_DISPLACEMENT = 0.18
+STROKE_MIN_DISPLACEMENT = 0.12
 # Stroke latch: frames the hand must stay below SCROLL_MIN_SPEED before
 # the latched direction resets.
-STROKE_RESET_FRAMES = 6
+STROKE_RESET_FRAMES = 4
 # Scroll: require consistent direction across these many consecutive frames.
 SCROLL_CONSECUTIVE = 3
 # Hand-size gate: ignore hands smaller than this fraction of the frame.
@@ -169,6 +169,27 @@ class Recognition:
     registration_candidate: Optional[GestureDefinition] = None
     scroll_direction: str = ""  # "up" | "down" | "left" | "right" | ""
     zoom_direction: str = ""    # "in" | "out" | ""
+    pinch_proximity: float = 0.0  # 0..1: how close the hand is to a pinch
+
+
+def pinch_proximity(lm: np.ndarray) -> float:
+    """0..1 closeness to a pinch (palm-normalized thumb-to-tip distances).
+
+    0 at a full spread hand (ratio ~0.7), 1 at a formed pinch (≤0.40).
+    Drives the pre-click precision slowdown: the closer the fingers get
+    to the thumb, the slower the cursor moves, so the click lands where
+    the user is aiming.
+    """
+    size = palm_size(lm)
+    if size <= 1e-6:
+        return 0.0
+    thumb = lm[4, :2]
+    idx = float(np.linalg.norm(lm[8, :2] - thumb)) / size
+    mid = float(np.linalg.norm(lm[12, :2] - thumb)) / size
+    ratio = (idx + mid) / 2.0
+    # Open hands read ~0.6–1.0 (thumb-index arc); a formed pinch ≤0.40.
+    close, far = PINCH_MAX_RATIO, 0.85
+    return max(0.0, min(1.0, (far - ratio) / (far - close)))
 
 
 class GestureRecognizer:
@@ -359,6 +380,10 @@ class GestureRecognizer:
             self._static_count = 0
             return Recognition(kind="none", label="Tracking...", confidence=0.3)
 
+        # Pre-click precision metric (computed once per frame; every path
+        # below reports it so the cursor can slow as a click approaches).
+        prox = pinch_proximity(primary.landmarks)
+
         # Update the differentiator's sliding window with the primary hand.
         self._diff.update(primary)
         kind, direction, conf, label = self._diff.classify(self.motions)
@@ -376,6 +401,7 @@ class GestureRecognizer:
                 confidence=conf,
                 zoom_direction=direction,
                 scroll_direction=scroll_dir,
+                pinch_proximity=prox,
             )
 
         if kind == "scroll":
@@ -386,6 +412,7 @@ class GestureRecognizer:
                 label=label or "You are trying to scroll",
                 confidence=conf,
                 scroll_direction=scroll_dir or direction,
+                pinch_proximity=prox,
             )
 
         # Static branch: pinch / fist / open palm.
@@ -398,7 +425,8 @@ class GestureRecognizer:
                 "open_palm": "Open palm",
             }
             return Recognition(
-                kind=kind_static, label=labels[kind_static], confidence=conf_static
+                kind=kind_static, label=labels[kind_static], confidence=conf_static,
+                pinch_proximity=prox,
             )
 
         candidate = self._update_registration(lm)
@@ -408,6 +436,8 @@ class GestureRecognizer:
                 label="New gesture detected",
                 confidence=0.6,
                 registration_candidate=candidate,
+                pinch_proximity=prox,
             )
 
-        return Recognition(kind="none", label="Tracking...", confidence=0.3)
+        return Recognition(kind="none", label="Tracking...", confidence=0.3,
+                           pinch_proximity=prox)

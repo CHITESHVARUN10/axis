@@ -280,6 +280,7 @@ class DebugView:
     tutorial_active: bool = False
     tutorial_step: int = 0
     mirror_preview: bool = True  # selfie view: flip the feed horizontally
+    _flipbuf: Optional[np.ndarray] = None  # reused flip destination buffer
     _continue_done: bool = True
     _buttons: list[NavButton] = field(default_factory=list)
     _last_frame_wh: tuple[int, int] = (640, 480)
@@ -488,7 +489,11 @@ class DebugView:
             # Selfie view: show the flipped pixels AND flip the landmark
             # x-coords before drawing, so the skeleton/trail sit exactly
             # on the hand the user sees (not mirrored to the wrong side).
-            frame = cv2.flip(frame, 1)
+            # The destination buffer is reused — no full-frame copy/frame.
+            if self._flipbuf is None or self._flipbuf.shape != frame.shape:
+                self._flipbuf = np.empty_like(frame)
+            cv2.flip(frame, 1, dst=self._flipbuf)
+            frame = self._flipbuf
         if hand is not None:
             draw_landmarks(frame, hand, mirror_x=self.mirror_preview)
             if rec.kind == "unknown" and rec.registration_candidate is not None:

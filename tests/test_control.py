@@ -31,8 +31,9 @@ def _state(**kw):
     return ControlState(cfg, clock=clock), clock
 
 
-def _rec(kind, scroll_direction=""):
-    return type("R", (), {"kind": kind, "scroll_direction": scroll_direction})()
+def _rec(kind, scroll_direction="", proximity=0.0):
+    return type("R", (), {"kind": kind, "scroll_direction": scroll_direction,
+                          "pinch_proximity": proximity})()
 
 
 def _hand(x=0.5, y=0.5):
@@ -103,25 +104,55 @@ def test_hand_absent_briefly_stays_tracking():
     assert d.state == "tracking"
 
 
-# --- click debounce -----------------------------------------------------
+# --- click semantics (release-confirmed) --------------------------------
 
-def test_pinch_clicks_after_debounce_not_before():
-    st, _ = _state(click_debounce_frames=3)
+def test_pinch_clicks_on_release_not_before():
+    st, _ = _state(click_debounce_frames=2)
     st.update("open_palm", True)
-    assert st.update("pinch", True, cursor_pos=(100, 100)).action == "none"
-    assert st.update("pinch", True, cursor_pos=(100, 100)).action == "none"
-    d = st.update("pinch", True, cursor_pos=(100, 100))
+    for _ in range(2):
+        d = st.update("pinch", True, cursor_pos=(100, 100))
+        assert d.action == "none"
+    d = st.update("open_palm", True)
     assert d.action == "click"
+    # But a single-frame pinch glitch does not click.
+    st2, _ = _state(click_debounce_frames=2)
+    st2.update("open_palm", True)
+    st2.update("pinch", True, cursor_pos=(100, 100))
+    assert st2.update("open_palm", True).action != "click"
 
 
 def test_double_pinch_close_together_is_double_click():
     st, clock = _state(click_debounce_frames=1, double_click_ms=500.0)
     st.update("open_palm", True)
-    assert st.update("pinch", True, cursor_pos=(50, 50)).action == "click"
-    st.update("open_palm", True)
+    st.update("pinch", True, cursor_pos=(50, 50))
+    assert st.update("open_palm", True).action == "click"
     clock.advance(0.2)
-    d = st.update("pinch", True, cursor_pos=(52, 50))
+    st.update("pinch", True, cursor_pos=(52, 50))
+    d = st.update("open_palm", True)
     assert d.action == "double_click"
+
+
+def test_pinch_hold_still_is_right_click():
+    """Holding the pinch still (jitter under drag threshold) = context menu."""
+    st, clock = _state(right_click_hold_ms=600.0)
+    st.update("open_palm", True)
+    st.update("pinch", True, cursor_pos=(100, 100))
+    clock.advance(0.7)
+    d = st.update("pinch", True, cursor_pos=(102, 101))  # 3px jitter < 5px
+    assert d.action == "right_click"
+    # The release fires no left click — the right click was consumed.
+    clock.advance(0.1)
+    d = st.update("open_palm", True)
+    assert d.action != "click"
+
+
+def test_pinch_hold_with_movement_never_right_clicks():
+    st, clock = _state(right_click_hold_ms=600.0, drag_hold_ms=300.0)
+    st.update("open_palm", True)
+    st.update("pinch", True, cursor_pos=(100, 100))
+    clock.advance(0.35)
+    d = st.update("pinch", True, cursor_pos=(120, 100))  # moved 20px
+    assert (d.state, d.action) == ("dragging", "drag_start")
 
 
 # --- drag latch ---------------------------------------------------------
@@ -159,36 +190,56 @@ def test_drag_auto_drops_when_hand_lost():
     assert d.action == "drag_end"
 
 
-# --- scroll -------------------------------------------------------------
+# --- scroll (proportional, palm-delta driven) ---------------------------
 
-def test_scroll_maps_direction_to_wheel():
+def test_scroll_proportional_to_palm_travel():
     st, _ = _state()
-    d = st.update("scroll", True, scroll_direction="down")
-    assert d.state == "scrolling"
+    d0 = st.update("scroll", True, scroll_direction="down",
+                   palm_center=(0.5, 0.5))
+    assert d0.state == "scrolling"
+    assert d0.action == "none"  # anchor frame: no palm delta yet
+    d = st.update("scroll", True, scroll_direction="down",
+                  palm_center=(0.5, 0.55))
     assert d.action == "scroll"
-    assert d.scroll_dy < 0
-    # Continuous scroll: an empty-direction frame mid-stroke keeps
-    # scrolling the latched direction (no flip, no stall).
-    d = st.update("scroll", True, scroll_direction="")
-    assert d.state == "scrolling"
+    # Hand moved down 0.05 norm × 1200 px/norm = 60 → dy NEGATIVE (down).
+    assert d.scroll_dy == -60.0
+    assert d.scroll_dx == 0.0
+
+
+def test_scroll_up_moves_wheel_positive():
+    st, _ = _state()
+    st.update("scroll", True, scroll_direction="up", palm_center=(0.5, 0.5))
+    d = st.update("scroll", True, scroll_direction="up",
+                  palm_center=(0.5, 0.45))
     assert d.action == "scroll"
-    assert d.scroll_dy < 0
+    assert d.scroll_dy > 0  # hand up = scroll up
+
+
+def test_scroll_horizontal_axis():
+    st, _ = _state()
+    st.update("scroll", True, scroll_direction="left", palm_center=(0.5, 0.5))
+    d = st.update("scroll", True, scroll_direction="left",
+                  palm_center=(0.45, 0.5))
+    assert d.action == "scroll"
+    assert d.scroll_dx < 0  # hand left = scroll left
+    assert d.scroll_dy == 0.0
 
 
 def test_scroll_without_direction_posts_nothing():
     st, _ = _state()
-    d = st.update("scroll", True, scroll_direction="")
+    st.update("scroll", True, scroll_direction="", palm_center=(0.5, 0.5))
+    d = st.update("scroll", True, scroll_direction="", palm_center=(0.5, 0.55))
     assert d.state == "scrolling"
     assert d.action == "none"
 
 
-def test_scroll_velocity_scales_wheel():
+def test_scroll_fast_stroke_capped_per_frame():
     st, _ = _state()
-    slow = st.update("scroll", True, scroll_direction="down", palm_delta_px=0.0)
-    st2, _ = _state()
-    fast = st2.update("scroll", True, scroll_direction="down", palm_delta_px=80.0)
-    assert fast.action == "scroll" and slow.action == "scroll"
-    assert abs(fast.scroll_dy) > abs(slow.scroll_dy)
+    st.update("scroll", True, scroll_direction="down", palm_center=(0.5, 0.5))
+    d = st.update("scroll", True, scroll_direction="down",
+                  palm_center=(0.5, 0.7))  # 0.2 norm → would be 240px
+    assert d.action == "scroll"
+    assert abs(d.scroll_dy) == 60.0  # capped at scroll_max_px
 
 
 def test_scroll_grace_holds_cursor_between_strokes():
@@ -339,10 +390,14 @@ class FakePointer:
         self._c_prev = None
         self.moves = 0
         self.resets = 0
+        self.gain_scale = 1.0
 
     def update(self, c, dt=1.0 / 30.0):
         self.moves += 1
         return (self.pos_x, self.pos_y)
+
+    def set_gain_scale(self, s):
+        self.gain_scale = s
 
     def reset(self):
         self.resets += 1
@@ -402,10 +457,48 @@ def test_control_frame_clicks_on_debounced_pinch():
     st, _ = _state(click_debounce_frames=1)
     ptr, real, ov = FakePointer(), FakeReal(), FakeOverlay()
     cfg = CursorConfig()
-    _control_frame(st, ptr, real, ov, _rec("open_palm"), _hand(), cfg)
-    _control_frame(st, ptr, real, ov, _rec("pinch"), _hand(), cfg)
+    _control_frame(st, ptr, real, ov, _rec("open_palm"), _hand(0.5, 0.5), cfg)
+    # Release-driven: pinch must be held for the debounce frames, then
+    # released, before the click posts.
+    _control_frame(st, ptr, real, ov, _rec("pinch"), _hand(0.5, 0.5), cfg)
+    assert "click" not in real.calls
+    d = _control_frame(st, ptr, real, ov, _rec("pinch"), _hand(0.5, 0.5), cfg)
+    assert "click" not in real.calls
+    d = _control_frame(st, ptr, real, ov, _rec("open_palm"), _hand(0.5, 0.5), cfg)
     assert "click" in real.calls
     assert "move" in real.calls
+
+
+def test_control_frame_right_click_on_hold():
+    """Pinch held still past right_click_hold_ms posts a right click."""
+    import time as _time
+    ptr, real, ov = FakePointer(), FakeReal(), FakeOverlay()
+    cfg = CursorConfig()
+    base = _time.monotonic()
+    fake_t = [base]
+    st2 = ControlState(cfg.control, clock=lambda: fake_t[0])
+    _control_frame(st2, ptr, real, ov, _rec("open_palm"), _hand(0.5, 0.5), cfg)
+    fake_t[0] = base
+    _control_frame(st2, ptr, real, ov, _rec("pinch"), _hand(0.5, 0.5), cfg)
+    assert "click" not in real.calls
+    fake_t[0] = base + 0.7
+    _control_frame(st2, ptr, real, ov, _rec("pinch", proximity=0.9),
+                   _hand(0.5, 0.5), cfg)
+    assert "click" in real.calls
+    assert ptr.gain_scale == cfg.control.precision_gain  # pre-click precision
+
+
+def test_control_frame_precision_resets_on_open_palm():
+    """Pre-click slowdown applies near a pinch, resets with an open palm."""
+    ptr, real, ov = FakePointer(), FakeReal(), FakeOverlay()
+    cfg = CursorConfig()
+    st, _ = _state()
+    _control_frame(st, ptr, real, ov, _rec("pinch", proximity=0.9),
+                   _hand(0.5, 0.5), cfg)
+    assert ptr.gain_scale == cfg.control.precision_gain
+    _control_frame(st, ptr, real, ov, _rec("open_palm", proximity=0.0),
+                   _hand(0.5, 0.5), cfg)
+    assert ptr.gain_scale == 1.0
 
 
 def test_control_frame_clutch_freezes_cursor():
@@ -421,5 +514,10 @@ def test_control_frame_scroll_posts_wheel_not_move():
     st, _ = _state()
     ptr, real, ov = FakePointer(), FakeReal(), FakeOverlay()
     cfg = CursorConfig()
-    _control_frame(st, ptr, real, ov, _rec("scroll", "down"), _hand(), cfg)
+    # Anchor frame.
+    _control_frame(st, ptr, real, ov, _rec("scroll", "down"), _hand(0.5, 0.5), cfg)
+    assert real.calls == []
+    # Palm moved down → wheel event posted, no cursor move.
+    d = _control_frame(st, ptr, real, ov, _rec("scroll", "down"), _hand(0.5, 0.55), cfg)
     assert real.calls == ["scroll"]
+    assert ptr.pos_x == 700.0 and ptr.pos_y == 500.0

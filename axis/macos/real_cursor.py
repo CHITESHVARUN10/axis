@@ -19,12 +19,30 @@ from __future__ import annotations
 import sys
 from typing import Optional, Tuple
 
+_QUARTZ = None
+
+
+def _q():
+    """Cached Quartz import (the old per-call `import Quartz` ran import
+    machinery on the hot path every frame)."""
+    global _QUARTZ
+    if _QUARTZ is None:
+        import Quartz
+        _QUARTZ = Quartz
+    return _QUARTZ
+
 
 class RealCursorController:
     """Thin, dependency-free wrapper around Quartz cursor functions."""
 
     def __init__(self):
         self._pos: Tuple[float, float] = (0.0, 0.0)
+        # Scroll-wheel residue (per wheel axis): CGEventCreateScrollWheelEvent
+        # takes integer deltas, so float scroll amounts are accumulated and
+        # only whole pixels are emitted each call. Without this, a 0.3px/
+        # frame scroll would truncate to zero forever ("doesn't scroll").
+        self._res_x: float = 0.0
+        self._res_y: float = 0.0
 
     # --- availability ---------------------------------------------------
 
@@ -56,8 +74,7 @@ class RealCursorController:
         Falls back to the cached position when Quartz is unavailable.
         """
         try:
-            import Quartz
-
+            Quartz = _q()
             ev = Quartz.CGEventCreate(None)
             if ev is None:
                 return self._pos
@@ -74,7 +91,7 @@ class RealCursorController:
     @staticmethod
     def _button_kinds(button: str):
         """Return (down, up, dragged, btn) Quartz constants for a button."""
-        import Quartz
+        Quartz = _q()
 
         if button == "right":
             return (
@@ -97,7 +114,7 @@ class RealCursorController:
         gx, gy = self.map_to_global(x, y)
         self._pos = (gx, gy)
         try:
-            import Quartz
+            Quartz = _q()
 
             Quartz.CGWarpMouseCursorPosition((gx, gy))
             ev = Quartz.CGEventCreateMouseEvent(
@@ -113,7 +130,7 @@ class RealCursorController:
         if button not in ("left", "right"):
             button = "left"
         try:
-            import Quartz
+            Quartz = _q()
 
             down, up, _, btn = self._button_kinds(button)
             for kind in (down, up):
@@ -128,7 +145,7 @@ class RealCursorController:
         if button not in ("left", "right"):
             button = "left"
         try:
-            import Quartz
+            Quartz = _q()
 
             down, _, _, btn = self._button_kinds(button)
             ev = Quartz.CGEventCreateMouseEvent(None, down, self._pos, btn)
@@ -142,7 +159,7 @@ class RealCursorController:
         if button not in ("left", "right"):
             button = "left"
         try:
-            import Quartz
+            Quartz = _q()
 
             _, up, _, btn = self._button_kinds(button)
             ev = Quartz.CGEventCreateMouseEvent(None, up, self._pos, btn)
@@ -158,7 +175,7 @@ class RealCursorController:
         if button not in ("left", "right"):
             button = "left"
         try:
-            import Quartz
+            Quartz = _q()
 
             _, _, dragged, btn = self._button_kinds(button)
             Quartz.CGWarpMouseCursorPosition((gx, gy))
@@ -173,21 +190,41 @@ class RealCursorController:
         return bool(self.click(button)) and bool(self.click(button))
 
     def scroll(self, dy: float, dx: float = 0.0) -> bool:
-        """Post a scroll-wheel event (positive dy = scroll up).
+        """Post a scroll-wheel event (positive dy = scroll up), pixel units.
 
-        Supports 2-axis scroll; falls back to the 1-axis call when the
-        installed Quartz only accepts a single wheel argument.
+        `dy`/`dx` are float pixel deltas for THIS call (frame). CGEvent
+        wheels only accept integers, so each value += its stored residue
+        and only the whole part is emitted — the remainder carries to the
+        next call, so proportional scrolling never truncates to zero and
+        never over-scrolls on rounding. If the user's hand reverses, the
+        residue resets so it can't bias the new direction.
         """
         try:
-            import Quartz
+            Quartz = _q()
 
+            def _wheel_emit(value: float, res: float) -> tuple[int, float]:
+                if value != 0.0 and res != 0.0 and (value > 0.0) != (res > 0.0):
+                    res = 0.0  # direction flip: old remainder is stale
+                total = res + value
+                # Truncate toward zero (not round): 0.6px emits nothing yet,
+                # 0.9px still nothing — only whole pixels post. round()
+                # would emit a full pixel at 0.5 and carry a negative debt,
+                # posting jitter events for net-zero motion.
+                emitted = int(total)
+                return emitted, total - emitted
+
+            emitted_y, self._res_y = _wheel_emit(float(dy), self._res_y)
+            emitted_x, self._res_x = _wheel_emit(float(dx), self._res_x)
+            if emitted_y == 0 and emitted_x == 0:
+                return True  # sub-pixel: keep accumulating, post nothing
             try:
                 ev = Quartz.CGEventCreateScrollWheelEvent(
-                    None, Quartz.kCGScrollEventUnitLine, 2, int(dy), int(dx)
+                    None, Quartz.kCGScrollEventUnitPixel, 2, emitted_y, emitted_x
                 )
             except Exception:
+                # 1-axis fallback loses dx — warn once rather than silently.
                 ev = Quartz.CGEventCreateScrollWheelEvent(
-                    None, Quartz.kCGScrollEventUnitLine, 1, int(dy)
+                    None, Quartz.kCGScrollEventUnitPixel, 1, emitted_y
                 )
             Quartz.CGEventPost(Quartz.kCGHIDEventTap, ev)
             return True

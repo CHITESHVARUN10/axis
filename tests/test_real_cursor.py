@@ -106,6 +106,34 @@ def test_scroll_posts_scrollwheel(mock_post, mock_scroll):
     assert ctrl.scroll(3) is True
     mock_scroll.assert_called_once()
     assert mock_post.call_count == 1
+    # Pixel-unit wheel: integer pixel deltas, not the old thick "lines".
+    import Quartz
+    assert mock_scroll.call_args.args[1] == Quartz.kCGScrollEventUnitPixel
+    assert mock_scroll.call_args.args[3] == 3
+
+
+@mock.patch("Quartz.CGEventCreateScrollWheelEvent")
+@mock.patch("Quartz.CGEventPost")
+def test_scroll_residue_carries_fracions(mock_post, mock_scroll):
+    """0.3px/frame scroll truncates to nothing under int(); with the
+    residue carry it must still produce an event every ~3 frames."""
+    ctrl = RealCursorController()
+    for _ in range(5):
+        ctrl.scroll(0.3)  # cannot make a whole pixel yet (0.3, 0.6, 0.9 →1)
+    amounts = [c.args[3] for c in mock_scroll.call_args_list]
+    assert sum(amounts) >= 1          # something eventually scrolled
+    assert all(a == int(a) for a in amounts)  # always integer pixels
+
+
+@mock.patch("Quartz.CGEventCreateScrollWheelEvent")
+@mock.patch("Quartz.CGEventPost")
+def test_scroll_residue_resets_on_direction_flip(mock_post, mock_scroll):
+    """An old +0.9 remainder must not bias the first downward pixels."""
+    ctrl = RealCursorController()
+    ctrl.scroll(0.9)            # carries +0.9 residue
+    ok = ctrl.scroll(-0.5)      # flips direction; -0.5 + 0.9 must NOT emit +0.4
+    emitted = mock_scroll.call_args.args[3] if mock_scroll.call_args else None
+    assert emitted is None or emitted <= 0
 
 
 @mock.patch("Quartz.CGEventPost", side_effect=Exception("not trusted"))

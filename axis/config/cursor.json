@@ -20,7 +20,7 @@
   "screen_clamp_margin_px": 1,
   "control": {
     "clutch_hand_absent_ms": 300.0,
-    "click_debounce_frames": 3,
+    "click_debounce_frames": 2,
     "click_freeze_ms": 100.0,
     "double_click_ms": 500.0,
     "double_click_max_px": 10.0,
@@ -28,6 +28,8 @@
     "drag_start_px": 5.0,
     "drop_hand_absent_ms": 500.0,
     "precision_gain": 0.25,
-    "scroll_px_per_line": 120.0
+    "right_click_hold_ms": 600.0,
+    "scroll_gain_px": 1200.0,
+    "scroll_max_px": 60.0
   }
 }

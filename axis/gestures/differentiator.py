@@ -54,9 +54,9 @@ SCROLL_MIN_FINGERS = FINGER_INDEX | FINGER_MIDDLE
 class DifferentiatorConfig:
     """Thresholds for the differentiator. All in palm-size-normalized units."""
 
-    window_frames: int = 12
-    path_min: float = 0.15        # below this: static branch
-    scroll_disp_min: float = 0.18  # net displacement to declare scroll
+    window_frames: int = 8
+    path_min: float = 0.10        # below this: static branch
+    scroll_disp_min: float = 0.12  # net displacement to declare scroll
     zoom_slope_min: float = 0.02  # normalized spread-ratio change / frame
     margin: float = 0.10           # best vs second-best learned score gap
     min_score: float = 0.35        # absolute score floor for learned classes
@@ -82,18 +82,25 @@ class MotionWindow:
 def _spread_slope(ratios: List[float]) -> float:
     """Least-squares slope of the spread ratio over time, normalized by mean.
 
-    Returns 0.0 for too few samples or a degenerate mean. Positive = fingers
-    spreading (zoom in), negative = pinching (zoom out).
+    Closed-form slope (no np.polyfit — fewer FLOPs/allocations on the
+    per-frame call). Returns 0.0 for too few samples or a degenerate mean.
+    Positive = fingers spreading (zoom in), negative = pinching (zoom out).
     """
-    if len(ratios) < 3:
+    n = len(ratios)
+    if n < 3:
         return 0.0
-    mean_r = float(np.mean(ratios))
+    mean_r = sum(ratios) / n
     if mean_r <= 1e-6:
         return 0.0
-    t = np.arange(len(ratios), dtype=np.float64)
-    r = np.asarray(ratios, dtype=np.float64)
-    slope = np.polyfit(t, r, 1)[0]
-    return float(slope / mean_r)
+    mean_t = (n - 1) / 2.0  # t = 0..n-1
+    num = den = 0.0
+    for t, r in enumerate(ratios):
+        dt = t - mean_t
+        num += dt * (r - mean_r)
+        den += dt * dt
+    if den <= 1e-12:
+        return 0.0
+    return float((num / den) / mean_r)
 
 
 class MotionDifferentiator:

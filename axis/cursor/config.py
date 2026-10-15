@@ -16,7 +16,7 @@ class ControlConfig:
     """
 
     clutch_hand_absent_ms: float = 300.0
-    click_debounce_frames: int = 3
+    click_debounce_frames: int = 2
     click_freeze_ms: float = 100.0
     double_click_ms: float = 500.0
     double_click_max_px: float = 10.0
@@ -24,13 +24,15 @@ class ControlConfig:
     drag_start_px: float = 5.0
     drop_hand_absent_ms: float = 500.0
     precision_gain: float = 0.25
-    scroll_px_per_line: float = 120.0
+    right_click_hold_ms: float = 600.0
+    scroll_gain_px: float = 1200.0  # scroll px per 1.0 normalized palm travel
+    scroll_max_px: float = 60.0    # per-frame cap, keeps spikes from jumping
 
     @classmethod
     def from_dict(cls, d: dict) -> "ControlConfig":
         return cls(
             clutch_hand_absent_ms=float(d.get("clutch_hand_absent_ms", 300.0)),
-            click_debounce_frames=int(d.get("click_debounce_frames", 3)),
+            click_debounce_frames=int(d.get("click_debounce_frames", 2)),
             click_freeze_ms=float(d.get("click_freeze_ms", 100.0)),
             double_click_ms=float(d.get("double_click_ms", 500.0)),
             double_click_max_px=float(d.get("double_click_max_px", 10.0)),
@@ -38,7 +40,9 @@ class ControlConfig:
             drag_start_px=float(d.get("drag_start_px", 5.0)),
             drop_hand_absent_ms=float(d.get("drop_hand_absent_ms", 500.0)),
             precision_gain=float(d.get("precision_gain", 0.25)),
-            scroll_px_per_line=float(d.get("scroll_px_per_line", 120.0)),
+            right_click_hold_ms=float(d.get("right_click_hold_ms", 600.0)),
+            scroll_gain_px=float(d.get("scroll_gain_px", 1200.0)),
+            scroll_max_px=float(d.get("scroll_max_px", 60.0)),
         )
 
 

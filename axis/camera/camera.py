@@ -100,6 +100,16 @@ class Camera:
             self._cap.release()
             self._cap = None
 
+    def reopen(self) -> None:
+        """Release and re-open the device after a stream stall.
+
+        Raises CameraError if the device cannot be re-opened (e.g. iPhone
+        disconnected or another app grabbed it). The caller decides how
+        often to retry and how to surface the message.
+        """
+        self.close()
+        self.open()
+
     def subscribe(self, callback: FrameCallback) -> None:
         self._subscribers.append(callback)
 

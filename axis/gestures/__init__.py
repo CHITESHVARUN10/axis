@@ -46,6 +46,7 @@ from axis.gestures.recognizer import (
     is_spread,
     make_open_palm_definition,
     make_pinch_definition,
+    pinch_proximity,
 )
 from axis.gestures.user_registry import (
     delete_user_gesture,
@@ -91,6 +92,7 @@ __all__ = [
     "is_fist_shape",
     "is_pinch_shape",
     "is_spread",
+    "pinch_proximity",
     "make_open_palm_definition",
     "make_pinch_definition",
     "delete_user_gesture",

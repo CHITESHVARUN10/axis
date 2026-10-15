@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional
 
+import cv2
 import mediapipe as mp
 import numpy as np
 from mediapipe.tasks import python as mp_python
@@ -65,13 +66,18 @@ class HandLandmarker:
     def __init__(
         self,
         model_path: Optional[str] = None,
-        num_hands: int = 2,
+        num_hands: int = 1,
         smoothing: float = 0.5,
     ):
         """Hand landmark extractor with per-hand EMA smoothing.
 
         `smoothing` is the EMA alpha: higher = more smoothing (jitter
         reduction, more lag). 0.5 is a good balance for 30fps video.
+
+        `num_hands` defaults to 1 — the gesture engine classifies the
+        single primary hand, and one hand halves MediaPipe inference time
+        plus the per-frame allocations. Pass 2 only when two-hand
+        templates matter (`--hands 2`).
         """
         model_path = model_path or str(ensure_hand_landmarker())
         # Lower confidence thresholds: hands are re-detected more readily
@@ -92,6 +98,10 @@ class HandLandmarker:
         self._timestamp_ms = 0
         self._smoothing = smoothing
         self._smoothed: dict[int, np.ndarray] = {}  # hand index -> EMA landmarks
+        # Preallocated RGB staging buffer (zeros per-frame allocations for
+        # the BGR→RGB conversion MediaPipe expects; SRGB data with BGR
+        # pixel order silently swaps channels and degrades detection).
+        self._rgb: Optional[np.ndarray] = None
 
     def _smooth(self, idx: int, arr: np.ndarray) -> np.ndarray:
         """EMA-smooth a hand's landmarks to kill frame-to-frame jitter."""
@@ -108,8 +118,11 @@ class HandLandmarker:
         if frame is None or frame.size == 0:
             return None
         h, w = frame.shape[:2]
+        if self._rgb is None or self._rgb.shape != frame.shape:
+            self._rgb = np.empty(frame.shape, dtype=np.uint8)
+        cv2.cvtColor(frame, cv2.COLOR_BGR2RGB, dst=self._rgb)
         mp_image = mp.Image(
-            image_format=mp.ImageFormat.SRGB, data=frame
+            image_format=mp.ImageFormat.SRGB, data=self._rgb
         )
         self._timestamp_ms += 33
         result = self._landmarker.detect_for_video(
@@ -117,9 +130,13 @@ class HandLandmarker:
         )
         hands: List[Hand] = []
         for idx, lm in enumerate(result.hand_landmarks):
-            arr = np.array(
-                [[p.x, p.y, p.z] for p in lm], dtype=np.float32
-            )  # (21,3) normalized
+            # Direct fill: one preallocated (21,3) array per hand instead
+            # of a Python list of 21 tuples per hand per frame.
+            arr = np.empty((21, 3), dtype=np.float32)
+            for i, p in enumerate(lm):
+                arr[i, 0] = p.x
+                arr[i, 1] = p.y
+                arr[i, 2] = p.z
             arr = self._smooth(idx, arr)
             handedness = "Left"  # MediaPipe's "left" = user's left when mirrored
             score = 0.0

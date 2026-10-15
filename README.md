@@ -31,8 +31,9 @@ python main.py --list-cameras             # show available camera devices
 python main.py --no-cursor                # disable the cursor overlay + real cursor
 python main.py --cursor-mode avatar       # arrow-only, click-through (no permission)
 python main.py --cursor-mode real         # move the actual macOS cursor (Accessibility)
-python main.py --cursor-mode control      # hand drives the REAL system cursor: move + click + drag + scroll
+python main.py --cursor-mode control      # hand drives the REAL system cursor: move + click + right-click + drag + scroll
 python main.py --clicks                   # pinch → left-click at the cursor (real mode)
+python main.py --hands 2                  # track both hands (default 1 — faster)
 python main.py --timeout 60               # inactivity timeout in seconds
 python main.py --hotkey 97                # global hotkey (keycode) toggles Gesture Mode
 ```
@@ -56,7 +57,8 @@ python main.py --clicks             # pinch → left-click at the cursor (real m
 
 - **Avatar cursor** (default without Accessibility): a macOS-style **arrow** (with a green ring when tracking, yellow when idle) roams the screen in a borderless, always-on-top, **click-through** window. It coexists with your real mouse cursor and stays visible even when the Axis camera window is minimized.
 - **Real cursor mode** (`--cursor-mode real` or `auto` with Accessibility granted): the hand moves the **actual macOS pointer** via Quartz — apps see hover states, and the optional `--clicks` flag turns a pinch into a left-click at the cursor. A small green ring marks the hand cursor.
-- **Control mode** (`--cursor-mode control`, the new `auto` default with Accessibility): your hand drives the **REAL system cursor** — the same one the mouse moves. **Open palm** (all fingers out) moves — hover works in every app, and moving it NEVER scrolls. **Two fingers** (index + middle out, pinky folded) + move = scroll, held strokes keep scrolling the latched direction (up stays up). Pinch clicks (debounced, double-pinch = double-click), pinch-hold + move drags, fist (or lost hand) clutches/freezes. Re-engaging re-anchors to the live OS position, so no cursor jump. Ring tint: green = tracking, yellow = clutched, blue = dragging, purple = scrolling.
+- **Control mode** (`--cursor-mode control`, the new `auto` default with Accessibility): your hand drives the **REAL system cursor** — the same one the mouse moves. **Open palm** (all fingers out) moves — hover works in every app, and moving it NEVER scrolls. **Two fingers** (index + middle out, pinky folded) + move = proportional pixel scroll in the locked direction. Pinch = click, pinch-hold still ≈0.6s = right click, pinch + move = drag, fist (or lost hand) clutches/freezes. Re-engaging re-anchors to the live OS position, so no cursor jump. Ring tint: green = tracking, yellow = clutched, blue = dragging, purple = scrolling. Every click event pulses a toast in the debug view (Left click / Double click / Right click / Drag), so you always see what the system identified.
+- **Precision slowdown**: as your fingers approach a pinch the cursor gain drops to ~25%, so clicks land exactly where you aim; the speed returns the instant the hand opens again.
 - **Relative** movement: small hand motions move the cursor; no absolute hand→screen mapping, no large arm sweeps; hand stops → cursor stops (dead zone + One Euro filter). **Speed follows your hand**: slow drifts stay near base gain (pixel-precise), fast swipes accelerate up to a per-frame cap (no teleporting). Lift and re-center like a trackpad finger to keep going; the cursor reaches the screen edges (Dock/menu bar).
 - **Accessibility**: enable it in System Settings → Privacy & Security → Accessibility, add your terminal app, then relaunch. Without it the avatar arrow is used and guidance is printed once.
 - Tuning lives in `axis/config/cursor.json` (mode, gain, acceleration, dead zone, smoothing, arrow size, plus the `control` block: clutch/click/drag/scroll thresholds).
@@ -67,11 +69,19 @@ python main.py --clicks             # pinch → left-click at the cursor (real m
 
 Scroll and zoom are disambiguated structurally — the engine first decides **palm translation vs. finger articulation**:
 
-- A **translating palm** is scroll (direction from net displacement).
+- A **translating two-finger palm** is scroll (direction from net displacement, then locked).
 - A **stationary palm with changing thumb-index spread** is zoom in/out.
-- Learned embeddings refine the scroll direction (up/down/left/right) but never decide scroll vs. zoom.
+- Static poses (pinch / fist / open palm) come from landmark ratio rules; move is just "open palm + translating".
+- Learned embeddings refine the scroll direction label but never decide scroll vs. zoom, never flip a direction, and can never veto a scroll.
 
 Thresholds live in `axis/config/differentiator.json` (path minimum, scroll displacement, zoom slope, margin, hysteresis).
+
+### Performance & memory notes
+
+- MediaPipe tracks **1 hand by default** (`--hands 2` re-enables two-hand recording) — roughly half the inference time and per-frame allocations.
+- Frames are converted BGR→RGB into a **reused buffer** before MediaPipe (channel-correct input; no per-frame allocation), and the preview flip writes into a reused buffer too.
+- The scroll wheel posts integer pixel events with a float residue carry; Quartz is imported once per process, not per call.
+- If the camera stream stalls (iPhone locks or disconnects), Axis tries to reopen every 5s with a printed notice instead of looping silently.
 
 ### Using your iPhone as the camera
 
@@ -85,25 +95,26 @@ The camera index may change if devices reorder, which is why name-based selectio
 
 ### Gestures (Phase 1)
 
-| Gesture | Detected by | Overlay shows |
+| Action | How to do it | Overlay shows |
 |---|---|---|
-| Pinch (index+middle to thumb) | static rule | "You are trying to click" (green) |
-| Scroll (**two fingers**: index+middle out, pinky folded, then move) | stroke latch + direction lock | "You are trying to scroll" + arrow (green) |
-| Move (**open palm**, all fingers out, then move) | tracking | cursor moves, never scrolls |
-| Zoom in (spread fingers) | continuous thumb-index distance | "Zooming in" + diverging arrows |
-| Zoom out (pinch fingers) | continuous thumb-index distance | "Zooming out" + converging arrows |
-| Open palm (held still) | static rule | "Open palm" (yellow) |
-| Fist (closed hand) | static rule | "Fist" (yellow) |
-| Learned motion (Scroll Down/Up/Left/Right) | recorded template | template name (green) |
-| Unknown motion | — | **recording flow** (below) |
+| **Move cursor** | Open palm (all fingers out), drift slowly — approaching a pinch slows the cursor for precision | tracking ring (green) |
+| **Left click** | Pinch (index+middle to thumb) and release quickly | "Left click" toast |
+| **Double click** | Two pinch-releases within 0.5s at the same spot | "Double click" toast |
+| **Right click** | Hold the pinch **still** for ~0.6s (sub-threshold jitter is fine) | "Right click" toast |
+| **Drag** | Pinch, keep holding and move ≥ few px at 0.3s — release to drop | "Drag" toast + blue ring |
+| **Scroll** | Two fingers (index+middle out, pinky folded) then stroke; travel-proportional, direction locked, both axes | "You are trying to scroll" + arrow (green) |
+| **Clutch / freeze** | Fist (or hand out of frame) | "Fist" (yellow ring) |
+| **Zoom in/out** | Spread / close the fingers while the palm stays put | "Zooming in/out" + arrows |
+| Learned motion | Recorded template | template name (green) |
+| Unknown pose | Held ~0.3s | **recording flow** (below) |
 
-**Scroll direction is stroke-latched and locked**: the app accumulates displacement and only declares a direction after a threshold is crossed, then holds it until the hand fully stops — up stays up, down stays down. A held two-finger stroke keeps scrolling (faster strokes scroll further). Learned embeddings only refine the label; they can never flip the direction or veto a scroll, and they ignore where the stroke started.
+**Scroll is pixel-proportional**: the wheel amount per frame equals palm travel × gain (tunable `control.scroll_gain_px`), accumulated as float and rounded with a carry — small strokes scroll a little, fast strokes a lot, and no amount is lost to integer truncation. The direction latches on the stroke and only resets after the hand fully stops, so up stays up.
 
 **Zoom is continuous**: thumb-index distance over time. Pinch fingers together = zoom out, spread apart = zoom in. It fires once per crossing (a held pinch is a click, not a zoom).
 
 ### Two-hand tracking
 
-- Both hands tracked simultaneously (MediaPipe `num_hands=2`).
+- MediaPipe tracks **1 hand by default** (`--hands 2` for simultaneous two-hand recording — templates still train per hand).
 - Static gestures classify the **primary** (highest-confidence) hand.
 - Scroll fires on a **two-finger** hand only (index+middle out, pinky folded; thumb/ring ignored as noisy) — a moving open palm moves the cursor and never scrolls; a moving fist/pinch never scrolls. This covers two-finger up/down/left/right strokes.
 - The preview is a **selfie view** (mirrored like Photo Booth) and the cursor follows what you see: move your hand right → cursor goes right. If it ever feels inverted, set `"mirror_x": false` in `axis/config/cursor.json`.
